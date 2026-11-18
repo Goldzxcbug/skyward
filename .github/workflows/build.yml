@@ -25,14 +25,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # A release goes by its tag to whoever downloads it, and a build by the
+  # An upstream image release goes by its tag, and its build by the
   # version built into it, which is what it holds against the newest
   # release's tag when it looks for an update: a tag naming another
   # version than the one built would have every phone find an update in
   # the very build it runs. Such a tag publishes nothing.
   tag:
     name: Check that the tag names the version built
-    if: github.ref_type == 'tag'
+    if: github.repository != 'Goldzxcbug/skyward' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
