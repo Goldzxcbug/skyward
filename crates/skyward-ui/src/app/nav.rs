@@ -79,6 +79,11 @@ impl App {
     /// In the file manager, back climbs a folder until it reaches the root,
     /// and in a place, until it reaches the place's top.
     pub(super) fn back(&mut self, now: u64) -> Vec<Effect> {
+        self.back_page(now, true)
+    }
+
+    /// Closing a section from the sidebar skips its folder history.
+    pub(super) fn back_page(&mut self, now: u64, within_folders: bool) -> Vec<Effect> {
         let (l, mut fx) = (self.state.lang, Vec::new());
         if self.stack.len() <= 1 {
             return fx;
@@ -103,14 +108,14 @@ impl App {
                 self.state.asking_delete = false;
             }
             Screen::Files => {
-                if let Some(up) = self.state.files.up() {
+                if within_folders && let Some(up) = self.state.files.up() {
                     return vec![Effect::ReadDir(up)];
                 }
                 // Leaving the file manager puts a picked entry down.
                 self.state.clip = None;
             }
             Screen::Choose(place) => {
-                if let Some(up) = self.state.folder(Screen::Choose(place)).up() {
+                if within_folders && let Some(up) = self.state.folder(Screen::Choose(place)).up() {
                     return vec![Effect::ReadPlace(place, up)];
                 }
             }
@@ -137,7 +142,15 @@ impl App {
                 self.state.joining = None;
                 self.state.password.clear();
             }
-            Screen::WlanNetwork => self.state.details = None,
+            Screen::WlanNetwork => {
+                self.state.details = None;
+                self.state.asking_delete = false;
+            }
+            // A swipe that was asked for goes with the page it was asked on.
+            Screen::Wlan => {
+                self.state.forget_pending = None;
+                self.state.asking_delete = false;
+            }
             // A list open over the page closes first.
             Screen::WlanAdd => {
                 if let Some(a) = self.state.adding.as_mut().filter(|a| a.choosing) {
@@ -266,10 +279,12 @@ impl App {
         // have been made, deleted or opened up to be read since. So does
         // coming back to the partitions after work on one, which may have
         // changed what it holds.
-        match self.screen() {
-            Screen::Restore => fx.push(self.find_backups()),
-            Screen::Filesystem | Screen::Filesystems if left == Screen::PartWork => fx.push(Effect::ReadFilesystems),
-            _ => {}
+        if within_folders {
+            match self.screen() {
+                Screen::Restore => fx.push(self.find_backups()),
+                Screen::Filesystem | Screen::Filesystems if left == Screen::PartWork => fx.push(Effect::ReadFilesystems),
+                _ => {}
+            }
         }
         fx
     }

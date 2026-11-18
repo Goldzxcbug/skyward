@@ -212,8 +212,13 @@ pub struct Haptics {
     #[serde(default)]
     pub click: Option<i16>,
     /// The file the driver says the motor's resonant frequency in, in
-    /// tenths of a hertz whatever its label.
+    /// tenths of a hertz whatever its label, unless `resonance_in_hertz`
+    /// says the driver writes the frequency itself.
     pub resonance: String,
+    /// Whether the file gives the frequency in hertz itself, as the drivers
+    /// of some phones do, rather than in tenths of one.
+    #[serde(default)]
+    pub resonance_in_hertz: bool,
     pub strength: Strength,
 }
 
@@ -275,6 +280,10 @@ pub struct Device {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Display {
+    /// Keep native video scanout active when the backlight is blanked on
+    /// panels whose driver cannot restore an atomic modeset after power-off.
+    #[serde(default)]
+    pub keep_scanout_on_blank: bool,
     #[serde(default)]
     pub width: u32,
     #[serde(default)]
@@ -312,6 +321,10 @@ impl Default for Modules {
 /// something before a recovery can read touches from it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Touch {
+    /// Clockwise rotation from the touch sensor's coordinate axes to the
+    /// display's native axes. Applied after normalizing each sensor axis.
+    #[serde(default)]
+    pub rotation: u16,
     /// What is written once the touchscreen's input device has appeared,
     /// each value to its file: the driver makes that device as the last
     /// step of starting the controller.
@@ -498,6 +511,7 @@ impl DeviceConfig {
 
     pub fn parse(text: &str) -> Result<Self> {
         let cfg: DeviceConfig = toml::from_str(text).context("parse device config")?;
+        ensure!(matches!(cfg.touch.rotation, 0 | 90 | 180 | 270), "[touch] rotation: {} is not 0, 90, 180 or 270 degrees", cfg.touch.rotation);
         for log in &cfg.wipe.logs {
             let path = Path::new(log);
             let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
@@ -623,9 +637,23 @@ mod tests {
         assert!(cfg.device.ab);
         assert_eq!(cfg.device.os_version_prop, "ro.build.display.id");
         assert_eq!(cfg.modules.sources, default_module_sources());
+        assert_eq!(cfg.touch.rotation, 0, "existing device configs keep their touch axes");
         assert!(cfg.modules.load.is_empty());
         assert_eq!((cfg.firmware, cfg.wlan, cfg.update), (None, None, None), "a phone may have none of them");
         assert_eq!(cfg.logd, None, "a recovery's own logd usually has all it needs");
+    }
+
+    #[test]
+    fn touch_rotation_accepts_only_quarter_turns() {
+        let with = |rotation: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[touch]\nrotation = {rotation}\n"));
+        for rotation in [0, 90, 180, 270] {
+            assert_eq!(with(&rotation.to_string()).unwrap().touch.rotation, rotation);
+        }
+        for rotation in ["1", "45", "360", "-90", "65536", "\"90\""] {
+            assert!(with(rotation).is_err(), "invalid rotation {rotation}");
+        }
+        let pad = DeviceConfig::parse(include_str!("../../../devices/erhai.toml")).unwrap();
+        assert_eq!(pad.touch.rotation, 270, "the Pad sensor's portrait axes are rotated onto its native landscape display");
     }
 
     #[test]

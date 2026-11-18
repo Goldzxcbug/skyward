@@ -54,6 +54,7 @@ mod scroll;
 mod skyward;
 mod state;
 mod systems;
+mod tablet;
 mod terminal;
 #[cfg(test)]
 mod testing;
@@ -223,11 +224,16 @@ pub enum Confirm {
     RemoveSystem,
     /// Install the system the installer holds with the room chosen.
     InstallSystem,
+    /// Forget the network the WLAN page offers, with the password kept for
+    /// it. A swipe then does it.
+    ForgetNetwork,
 }
 
 /// What a control does when touched.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
+    /// Open a section from the tablet's navigation column.
+    Sidebar(Screen),
     Open(Screen),
     /// Leave the decrypt page for the page it was opened from; the page
     /// the recovery started on, for the home page without keeping it
@@ -355,6 +361,11 @@ pub enum Action {
     OpenJoined,
     /// Leave the network joined, and forget it.
     LeaveNetwork,
+    /// Forget the network the details page is of, with the password kept
+    /// for it: a swipe then does it.
+    ForgetNetwork,
+    /// Forget the saved network at this place in the list of those kept.
+    ForgetSaved(usize),
     /// Look for the networks in range again.
     Rescan,
     /// Open the page that adds a network by hand.
@@ -571,6 +582,11 @@ pub enum Effect {
     ScanWlan,
     JoinWlan { ssid: Vec<u8>, name: String, security: Security, password: Secret },
     LeaveWlan,
+    /// Forget the saved network named `name`, with the password kept for it,
+    /// telling how it went with [`App::wlan_forgotten`]. An empty name
+    /// forgets every network kept, which is what turning the switch that
+    /// remembers networks off asks for.
+    ForgetWlan(String),
     /// Ask the update server for the newest system, telling what it
     /// answered with [`App::update_checked`].
     CheckUpdate,
@@ -602,6 +618,7 @@ enum Drag {
     /// counts until it lifts.
     Held,
     Scroll { last: f32 },
+    Sidebar { start: (f32, f32), last: f32, pressed: Option<Screen> },
     /// Swiping in from a screen edge, the finger now `x` across; the cue
     /// keeps to height `cy`, set by where the swipe began. Past the
     /// threshold, lifting goes back.
@@ -1190,6 +1207,8 @@ pub struct App {
     /// How round the screen's corners are, in pixels.
     corners: f32,
     dirty: bool,
+    tablet: Option<tablet::Tablet>,
+    /// Width of the page, excluding the navigation column on a tablet.
     w: u32,
     h: u32,
     px_per_dp: f32,
@@ -1197,6 +1216,12 @@ pub struct App {
 
 impl App {
     pub fn new(start: Screen, w: u32, h: u32, px_per_dp: f32) -> Self {
+        let tablet = tablet::Tablet::new(w, h, px_per_dp);
+        let start = match (&tablet, start) {
+            (Some(_), Screen::Home) => Screen::About,
+            _ => start,
+        };
+        let w = w - tablet.as_ref().map_or(0, |tablet| tablet.width);
         App {
             state: State::default(),
             stack: vec![(start, 0.0, Focus::Unset)],
@@ -1256,6 +1281,7 @@ impl App {
             backdrop: None,
             corners: 0.0,
             dirty: true,
+            tablet,
             w,
             h,
             px_per_dp,
@@ -1272,7 +1298,11 @@ impl App {
         if self.state.dark {
             Theme::dark(self.w, self.h, self.px_per_dp)
         } else {
-            Theme::light(self.w, self.h, self.px_per_dp)
+            let mut theme = Theme::light(self.w, self.h, self.px_per_dp);
+            if self.tablet.is_some() {
+                theme.hero.glow = &glow::TABLET_LIGHT;
+            }
+            theme
         }
     }
 
@@ -1498,7 +1528,11 @@ impl App {
         if self.screen() == Screen::About {
             let look = self.theme().hero.glow;
             match &mut self.glow {
-                Some(g) if std::ptr::eq(g.look(), look) => g.advance(now),
+                Some(g) if std::ptr::eq(g.look(), look) => {
+                    if self.tablet.is_none() {
+                        g.advance(now);
+                    }
+                }
                 _ => self.glow = Some(GlowClock::new(look, now)),
             }
             if self.glowing() {
@@ -1511,7 +1545,7 @@ impl App {
 
     /// Whether the About page's field is on screen, moving.
     fn glowing(&self) -> bool {
-        self.glow.is_some() && self.display_on && self.top().1 < self.theme().m.dp(ABOUT_FIELD_DP)
+        self.tablet.is_none() && self.glow.is_some() && self.display_on && self.top().1 < self.theme().m.dp(ABOUT_FIELD_DP)
     }
 
     /// Whether the bar's title and the bar belong over the rendered page

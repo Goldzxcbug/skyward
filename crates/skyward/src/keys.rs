@@ -30,14 +30,13 @@ pub struct Found {
 /// recovery names it first, as the phone's scripts have init name it, and
 /// reads the partitions as the phone so named.
 ///
-/// `libraries` is where the libraries the phone's partitions were built
-/// against are opened, on a phone that carries them as a bundle of their
-/// own: each of its programs is given the folder among its own.
+/// `libraries` is a directory of shared libraries a program run for that
+/// may need, searched after whatever it names itself.
 pub fn found(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Found> {
     let mut phone = read(slot, libraries)?;
     let unnamed = naming::steps(&phone)?;
     if !unnamed.is_empty() {
-        name(&unnamed)?;
+        name(&unnamed, libraries)?;
         phone = read(slot, libraries)?;
     }
     Ok(Found { described: phone.told_of(), steps: secure::steps(&phone) })
@@ -46,8 +45,7 @@ pub fn found(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Found>
 /// The phone as the partitions of the slot's installed system describe it,
 /// read with the properties its init has as it reads them: the
 /// bootloader's, with those the recovery has set beside them as the
-/// phone's init sets them, and the installed build's. `libraries` is as
-/// [`found`] takes it.
+/// phone's init sets them, and the installed build's.
 fn read(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Phone> {
     let properties = skyward_info::installed_props(slot)?;
     let mounted = skyward_vab::mounted_partitions(slot)?;
@@ -65,11 +63,11 @@ fn read(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Phone> {
 /// value as the properties stand by then, the programs having set theirs.
 /// Init goes on however a program ends, and a property whose value names
 /// one nobody has set stays unset, as init leaves it.
-fn name(does: &[Does]) -> Result<()> {
+fn name(does: &[Does], libraries: Option<&Path>) -> Result<()> {
     for one in does {
         match one {
             Does::Run(program) => {
-                let status = crate::services::once(program)?;
+                let status = crate::services::once(program, libraries)?;
                 skyward_sys::kmsg(&format!("ran {} {}, which ended: {status}", program.service.path, program.service.args.join(" ")))?;
             }
             Does::Set { name, value } => match phone::expand(value, skyward_sys::prop) {
@@ -97,15 +95,30 @@ pub fn serves_elements(steps: &[Step]) -> bool {
 /// Do `steps` in order: start each program and wait until it is ready,
 /// and serve the secure element service where it stands among them, which
 /// is after the secure elements' own services have registered and before
-/// the weaver that reaches its secure element through it starts. Each
-/// program names every folder its libraries are looked for in.
-pub fn start(steps: &[Step]) -> Result<()> {
+/// the weaver that reaches its secure element through it starts.
+///
+/// `libraries` is a directory of shared libraries every program may need,
+/// searched after whatever it names itself.
+pub fn start(steps: &[Step], libraries: Option<&Path>) -> Result<()> {
     for step in steps {
         match step {
-            Step::Start(program) => crate::services::start(std::slice::from_ref(program.as_ref()), None)?,
+            Step::Start(program) => {
+                crate::bootlog::line(format!("starting key program {}", program.service.path));
+                crate::services::start(std::slice::from_ref(program.as_ref()), libraries)?;
+                crate::bootlog::line(format!("key program ready: {}", program.service.path));
+                if program.service.ready_service.as_deref() == Some(skyward_crypto::weaver::SERVICE) {
+                    // getConfig checks the actual HAL reply without reading a
+                    // credential slot, consuming a try, or handling a secret.
+                    let binder = skyward_binder::driver::Binder::open()?;
+                    let config = skyward_crypto::weaver::Weaver::open(&binder)?.config()
+                        .context("the weaver registered but did not answer getConfig")?;
+                    crate::bootlog::line(format!("weaver configuration ready: {} slots, {} key bytes, {} value bytes",
+                        config.slots, config.key_bytes, config.value_bytes));
+                }
+            }
             Step::ServeElements => {
                 let readers = skyward_omapi::start()?;
-                skyward_sys::kmsg(&format!("{} is served, with a reader for each of {} secure elements: {}", skyward_omapi::SERVICE, readers.len(), readers.join(", ")))?;
+                crate::bootlog::line(format!("{} is served, with a reader for each of {} secure elements: {}", skyward_omapi::SERVICE, readers.len(), readers.join(", ")));
             }
         }
     }

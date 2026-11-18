@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "android")]
 mod backup;
 #[cfg(target_os = "android")]
+mod bootlog;
+#[cfg(target_os = "android")]
 mod decrypt;
 #[cfg(target_os = "android")]
 mod filework;
@@ -37,11 +39,15 @@ mod services;
 mod settings;
 #[cfg(target_os = "android")]
 mod systems;
+#[cfg(any(target_os = "android", test))]
+mod backlight;
 #[cfg(target_os = "android")]
 mod ui;
 #[cfg(target_os = "android")]
 mod updates;
-#[cfg(any(target_os = "android", test))]
+// PLK110 uses haptics/shapes.rs at runtime; keep the upstream waveform
+// module's independent regression tests available on the host.
+#[cfg(test)]
 mod waveform;
 #[cfg(target_os = "android")]
 mod wipe;
@@ -49,7 +55,7 @@ mod wipe;
 mod wlan;
 
 #[derive(Parser)]
-#[command(name = "skyward", version, about = "Skyward recovery")]
+#[command(name = "skyward", version = skyward_info::VERSION, about = "Skyward recovery")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -292,7 +298,7 @@ fn main() -> Result<()> {
             let services: Vec<Started> = DeviceConfig::load(&config)?.services.into_iter().filter(|s| s.runs_on(&props)).map(Started::from).collect();
             let libraries = secure::libraries()?;
             services::start(&services, libraries.as_deref())?;
-            keys::start(&keys::found(slot, libraries.as_deref())?.steps?)?;
+            keys::start(&keys::found(slot, libraries.as_deref())?.steps?, libraries.as_deref())?;
             loop {
                 std::thread::park();
             }
@@ -447,7 +453,7 @@ fn main() -> Result<()> {
                 Ok(steps) => programs.extend(keys::programs(&steps)),
                 Err(e) => eprintln!("the programs of the phone's keys are not known: {e:#}"),
             }
-            ui::run(&cfg, &programs, &font, &mono, bcb::Request::default(), start, dump.as_deref())
+            ui::run(&cfg, &programs, &font, &mono, bcb::Request::default(), start, dump.as_deref(), None)
         }
     }
 }
@@ -534,20 +540,41 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     // The drivers ask for their firmware by name, and the kernel looks only
     // in folders of its own unless told to pass on what it does not find
     // there to ueventd, which looks in the recovery's firmware folders.
-    std::fs::write(FIRMWARE_FALLBACK, "1").with_context(|| format!("write 1 to {FIRMWARE_FALLBACK}"))?;
-    if let Some(firmware) = &cfg.firmware {
-        mount_firmware(&firmware.partition)?;
+    if let Err(e) = std::fs::write(FIRMWARE_FALLBACK, "1") {
+        bootlog::line(format!("firmware fallback is not enabled: {e}"));
+    }
+    if let Some(firmware) = &cfg.firmware
+        && let Err(e) = mount_firmware(&firmware.partition)
+    {
+        bootlog::line(format!("firmware partition is not mounted: {e:#}"));
     }
     for name in &cfg.partitions.mounted {
-        let at = skyward_block::fstab::mount(name)?;
-        skyward_sys::kmsg(&format!("{name} is mounted on {}", at.display()))?;
+        match skyward_block::fstab::mount(name) {
+            Ok(at) => bootlog::line(format!("{name} is mounted on {}", at.display())),
+            // What is read from a partition left out is left out, and
+            // nothing else.
+            Err(e) => bootlog::line(format!("{name} is not mounted: {e:#}")),
+        }
     }
-    for path in load_modules(cfg, &cfg.modules.load)? {
-        skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
+    // A module the installed partitions no longer carry, or one whose
+    // dependency cannot be found, is told of and left out: the program
+    // that needs it says so where it does not start, and every other
+    // program still runs.
+    for name in &cfg.modules.load {
+        match load_modules(cfg, std::slice::from_ref(name)) {
+            Ok(paths) => {
+                for path in paths {
+                    bootlog::line(format!("loaded {}", path.display()));
+                }
+            }
+            Err(e) => bootlog::line(format!("{name} is not loaded: {e:#}")),
+        }
     }
     if !cfg.owners.is_empty() {
-        let handed = hand_over(&cfg.owners)?;
-        skyward_sys::kmsg(&format!("{handed} of the phone's own files handed to the accounts its init gives them"))?;
+        match hand_over(&cfg.owners) {
+            Ok(handed) => bootlog::line(format!("{handed} of the phone's own files handed to the accounts its init gives them")),
+            Err(e) => bootlog::line(format!("not every one of the phone's own files is handed over: {e:#}")),
+        }
     }
     // What the phone describes is known wherever its partitions could be
     // read at all; what they say of its keys may still not be.
@@ -585,33 +612,48 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     told.extend(described.into_iter().filter(|name| !registering.contains(name)));
     if !told.is_empty() {
         secure::publish_descriptions(&told)?;
-        skyward_sys::kmsg(&format!("the service directory is told of {} of the phone's own services", told.len()))?;
+        bootlog::line(format!("the service directory is told of {} of the phone's own services", told.len()));
+        for name in told.iter().filter(|name| name.contains("supplicant")) {
+            bootlog::line(format!("the WLAN may register {name}"));
+        }
     }
     let libraries = secure::libraries()?;
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
     }
-    services::start(&services, libraries.as_deref())?;
-    let steps = found.context("make out from the phone's partitions how its keys are used")?;
-    for line in keys::describe(&steps) {
-        skyward_sys::kmsg(&format!("for the phone's keys: {}", line.replace("\n  ", ", ")))?;
+    // A program that does not start, or one that is not ready in time,
+    // holds up nothing after it: what it serves is missing and everything
+    // else, among it the phone's keys, still comes up.
+    if let Err(e) = services::start(&services, libraries.as_deref()) {
+        bootlog::line(format!("not every one of the phone's own programs runs: {e:#}"));
     }
-    keys::start(&steps)?;
-    agree_on_the_notes_key(&registering)
+    // What the partitions say of the keys may be unreadable while the rest
+    // of the phone is up: that is said, and the phone's own programs and
+    // the screen are left as they are.
+    match found.context("make out from the phone's partitions how its keys are used") {
+        Ok(steps) => {
+            for line in keys::describe(&steps) {
+                bootlog::line(format!("for the phone's keys: {}", line.replace("\n  ", ", ")));
+            }
+            if let Err(e) = keys::start(&steps, libraries.as_deref()) {
+                bootlog::line(format!("the phone's keys are not usable: {e:#}"));
+            }
+            if let Err(e) = agree_on_the_notes_key(&registering) {
+                bootlog::line(format!("the secure world did not agree on the key it signs its notes with: {e:#}"));
+            }
+        }
+        Err(e) => bootlog::line(format!("the phone's keys are not usable: {e:#}")),
+    }
+    Ok(())
 }
-
-/// How long a file handed over may take to be there once the modules are
-/// loaded: a driver makes its files as it takes its device up, and ueventd
-/// makes the device's node once the kernel has told it of the device,
-/// either of which may come after the load of the module returns.
-#[cfg(target_os = "android")]
-const FILES_MADE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Give each file the phone's own init hands over as it boots to the
 /// account it names, with the mode it gives, as its chown and chmod lines
-/// do. The files are the ones the modules just loaded make, which the
-/// phone's own programs open as those accounts; one not there yet is
-/// waited for.
+/// do. The files are the ones the modules just loaded made, which the
+/// phone's own programs open as those accounts.
+#[cfg(target_os = "android")]
+const FILES_MADE: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[cfg(target_os = "android")]
 fn hand_over(owners: &[skyward_config::Owners]) -> Result<usize> {
     use skyward_sys::ueventd;
@@ -622,8 +664,20 @@ fn hand_over(owners: &[skyward_config::Owners]) -> Result<usize> {
     for run in owners {
         let (uid, gid) = (id(&run.user)?, id(&run.group)?);
         for path in &run.paths {
-            skyward_sys::wait_file(Path::new(path), FILES_MADE).context("wait for a file the modules just loaded make")?;
-            std::os::unix::fs::chown(path, Some(uid), Some(gid)).with_context(|| format!("give {path} to {}:{}", run.user, run.group))?;
+            if !Path::new(path).exists() {
+                let _ = skyward_sys::wait_file(Path::new(path), FILES_MADE);
+            }
+            // A node the phone's init names may not be there at all: its
+            // kernel layer makes some only once a program opens what makes
+            // them, as init's own chown lines find, and a recovery mounts
+            // the same partitions without the programs that would. Such a
+            // node is passed over rather than stopping every file after it
+            // and every program that is started after them.
+            match std::os::unix::fs::chown(path, Some(uid), Some(gid)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e).with_context(|| format!("give {path} to {}:{}", run.user, run.group)),
+            }
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(run.mode))
                 .with_context(|| format!("give {path} the mode {:o}", run.mode))?;
             handed += 1;
@@ -706,7 +760,8 @@ fn mount_firmware(partition: &str) -> Result<()> {
     let at = skyward_block::fstab::mount(partition)?;
     std::fs::create_dir_all(shown).with_context(|| format!("make {}", shown.display()))?;
     skyward_block::mount::bind(&at, shown)?;
-    skyward_sys::kmsg(&format!("{partition} is mounted on {}, shown at {}", at.display(), shown.display()))
+    bootlog::line(format!("{partition} is mounted on {}, shown at {}", at.display(), shown.display()));
+    Ok(())
 }
 
 /// What the phone's own secure services read to tell the secure world which
@@ -749,6 +804,7 @@ fn recovery() -> Result<()> {
         std::fs::create_dir_all(skyward_sys::RUN).with_context(|| format!("make {}", skyward_sys::RUN))?;
         std::fs::set_permissions(skyward_sys::RUN, std::fs::Permissions::from_mode(0o755))
             .with_context(|| format!("open {} to the recovery's other users", skyward_sys::RUN))?;
+        let _instance = skyward_sys::instance::acquire(&Path::new(skyward_sys::RUN).join("instance.lock"))?;
         skyward_sys::keep_log(Path::new(skyward_sys::LOG))?;
         // A recovery that ended with a function of its own in the port took
         // the port with it; going through "none" takes that function off.
@@ -815,12 +871,25 @@ fn recovery() -> Result<()> {
             // partitions the system asks for, as in Android's own recovery:
             // erasing them, which may take super with them, and undoing
             // shared blocks, which writes to the slot's own.
+            let root = Path::new("/");
+            bootlog::snapshot("before the screen");
+            let first = match ui::splash(&root.join(ramdisk::FONT), &root.join(ramdisk::MONO)) {
+                Ok(surface) => surface,
+                Err(e) => {
+                    bootlog::line(format!("the start screen was not shown: {e:#}"));
+                    None
+                }
+            };
             let mut programs = cfg.services.clone();
             if !matches!(request.work, bcb::Work::Fastboot | bcb::Work::WipeAb { .. } | bcb::Work::UnshareBlocks) {
                 programs.extend(prepare(&cfg, booted_slot()?)?);
             }
-            let root = Path::new("/");
-            ui::run(&cfg, &programs, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), request, Screen::Home, None)
+            let ran = ui::run(&cfg, &programs, &root.join(ramdisk::FONT), &root.join(ramdisk::MONO), request, Screen::Home, None, first);
+            bootlog::line(match &ran {
+                Ok(()) => "the pages closed".to_string(),
+                Err(e) => format!("the pages failed: {e:#}"),
+            });
+            ran
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -853,7 +922,7 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<Vec<skyward_co
             // Without them the screen still shows and the keys still work,
             // so this reason goes to the kernel log as well.
             if let Err(e) = bring_up(cfg, slot, found) {
-                skyward_sys::kmsg(&format!("devices not brought up: {e:#}"))?;
+                bootlog::line(format!("devices not brought up: {e:#}"));
             }
             Ok(programs)
         }

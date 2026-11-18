@@ -50,10 +50,13 @@ enum Through {
 /// The makes of weaver, each by what the name of its program ends in, the
 /// longer endings first: Thales' and NXP's go through Android's secure
 /// element service, and Goodix's, whose program is named after no maker,
-/// through Goodix's own.
-const WEAVERS: [(&str, Through); 3] = [
+/// through Goodix's own. OnePlus's NXP weaver is named for the maker alone,
+/// `android.hardware.weaver-service.nxp`, where Qualcomm's own builds end
+/// in `.nxp-qti`; both reach their element the same way.
+const WEAVERS: [(&str, Through); 4] = [
     (".thales", Through::ElementService),
     (".nxp-qti", Through::ElementService),
+    (".nxp", Through::ElementService),
     ("weaver-service", Through::Own("vendor.goodix.hardware.secure_element_aidl.IGdxEse")),
 ];
 
@@ -79,7 +82,7 @@ const HARDWARE_DIRECTORY_READY: &str = "hwservicemanager.ready";
 /// The directory for hardware services is the installed system's own
 /// program and runs on its libraries alone.
 const VENDOR_LIBRARIES: [&str; 3] = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw"];
-const ODM_LIBRARIES: [&str; 4] = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/odm/lib64"];
+const ODM_LIBRARIES: [&str; 5] = ["/system/lib64", "/vendor/lib64", "/vendor/lib64/hw", "/odm/lib64", "/odm/lib64/hw"];
 const SYSTEM_LIBRARIES: [&str; 3] = ["/mnt/system/system/lib64/bootstrap", "/mnt/system/system/lib64", "/mnt/system_ext/lib64"];
 
 /// The installed system's folders, where a program on the vendor or the
@@ -399,4 +402,40 @@ fn started(phone: &Phone, program: &Program, ready: Ready, registers: Vec<String
         capabilities: program.capabilities.clone().unwrap_or_default(),
     };
     Started { service, sockets: program.sockets.clone(), environment: program.environment.clone(), anew: false }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a weaver named `file` reaches its secure element through.
+    fn through(file: &str) -> Option<Through> {
+        WEAVERS.iter().find(|(ending, _)| file.ends_with(ending)).map(|(_, through)| *through)
+    }
+
+    #[test]
+    fn an_nxp_weaver_named_for_its_maker_alone_reaches_its_element_as_qualcomm_s_does() {
+        assert_eq!(
+            through("/odm/bin/hw/android.hardware.weaver-service.nxp"),
+            Some(Through::ElementService),
+            "OnePlus's weaver is named for the maker alone"
+        );
+        assert_eq!(through("/vendor/bin/hw/android.hardware.weaver-service.nxp-qti"), Some(Through::ElementService), "Qualcomm's own builds end in .nxp-qti");
+        assert_eq!(through("/odm/bin/hw/android.hardware.weaver-service.thales"), Some(Through::ElementService));
+        assert_eq!(
+            through("/odm/bin/hw/android.hardware.weaver-service"),
+            Some(Through::Own("vendor.goodix.hardware.secure_element_aidl.IGdxEse")),
+            "Goodix's program is named after no maker"
+        );
+        assert_eq!(through("/odm/bin/hw/android.hardware.weaver-service.unknown"), None, "a make the recovery does not know is not guessed at");
+    }
+
+    #[test]
+    fn a_vendor_program_finds_the_libraries_it_links_from_the_hardware_directory() {
+        assert!(VENDOR_LIBRARIES.contains(&"/vendor/lib64/hw"), "PLK110's eSE links libEseUtils.so from the hardware directory");
+        assert!(ODM_LIBRARIES.contains(&"/vendor/lib64/hw") && ODM_LIBRARIES.contains(&"/odm/lib64/hw"));
+        assert_eq!(VENDOR_LIBRARIES[..2], ["/system/lib64", "/vendor/lib64"], "the recovery's own binder and runtime libraries are searched first");
+        assert_eq!(ODM_LIBRARIES[..2], ["/system/lib64", "/vendor/lib64"]);
+        assert!(ODM_LIBRARIES.contains(&"/odm/lib64"));
+    }
 }

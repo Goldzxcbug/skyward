@@ -1,0 +1,38 @@
+{
+  "base": {
+    "repository": "https://github.com/kirklin/skyward",
+    "commit": "c5e09f6eb644e75e051b309f98d6745ccbc97d81"
+  },
+  "integrated": {
+    "repository": "https://github.com/liyongshun114514/skyward",
+    "commit": "d47bf652e462f836aa549f0a2b1f3bc40f2ffd21",
+    "license": "GPL-3.0-or-later",
+    "upstream_references": [
+      "https://github.com/Rinrroy/skyward-for-haotian",
+      "https://github.com/TvTzzz/skyward-oneplus-turbo-6v"
+    ]
+  },
+  "reference": {
+    "repository": "https://github.com/ReockF1/skyward-oneplus13",
+    "commit": "2e7adf69965e68e39a81034827ba1fec29b0203c",
+    "use": "ColorOS recovery startup and MTP porting reference"
+  },
+  "stock_recovery": {
+    "file": "recovery.img",
+    "sha256": "076c237ff4cf4ff53914b88c353042cf0f2c5ccc74c836ba11ee42b77055faae"
+  },
+  "device": {
+    "model": "OnePlus Pad 2 Pro",
+    "codename": "erhai",
+    "ota_device": "OP615EL1",
+    "system": "OPD2413_16.0.7.200(CN01)"
+  },
+  "changes": [
+    "Preserve upstream bundled-library lookup and device-node settling",
+    "LCD KTZ8868 backlight range from real Pad DT",
+    "Pad Qualcomm key-chain discovery fixtures",
+    "RAM-backed startup diagnostics",
+    "Derive AVB rollback fields from stock",
+    "Keep upstream release endpoint with strict device matching"
+  ]
+}

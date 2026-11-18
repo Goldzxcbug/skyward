@@ -11,8 +11,17 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Mutex;
 
-/// Version of this build, shown on the About page.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Version used to compare this build against release tags.
+pub const BUILD_VERSION: &str = match option_env!("SKYWARD_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
+/// Version shown in the recovery UI and command output.
+pub const VERSION: &str = match option_env!("SKYWARD_DISPLAY_VERSION") {
+    Some(name) if !name.is_empty() => name,
+    _ => BUILD_VERSION,
+};
 
 const CPU: &str = "/sys/devices/system/cpu";
 const POWER_SUPPLY: &str = "/sys/class/power_supply";
@@ -156,7 +165,12 @@ pub fn collect_with(cfg: &DeviceConfig, battery: Option<Battery>) -> Result<Devi
     Ok(DeviceInfo {
         // The system names the exact edition; the configured model covers a
         // system whose partitions are not mounted.
-        model: system.get("ro.product.marketname").unwrap_or_else(|| cfg.device.model.clone()),
+        // Xiaomi names the edition in its market name, OnePlus in its own
+        // market names for each language.
+        model: ["ro.product.marketname", "ro.vendor.oplus.market.name", "ro.vendor.oplus.market.enname"]
+            .iter()
+            .find_map(|name| system.get(name))
+            .unwrap_or_else(|| cfg.device.model.clone()),
         codename: cfg.device.codename.clone(),
         soc: cfg.device.soc.clone(),
         cpu: cpu(Path::new(CPU))?,
@@ -218,7 +232,26 @@ impl SystemProps {
 
 /// The order init reads build.prop files in at boot; later files override
 /// earlier ones.
-const PROP_ORDER: [&str; 8] = ["system", "system_ext", "system_dlkm", "vendor", "vendor_dlkm", "odm_dlkm", "odm", "product"];
+const PROP_ORDER: [&str; 18] = [
+    "system",
+    "system_ext",
+    "system_dlkm",
+    "vendor",
+    "vendor_dlkm",
+    "odm_dlkm",
+    "odm",
+    "product",
+    "my_product",
+    "my_stock",
+    "my_bigball",
+    "my_heytap",
+    "my_region",
+    "my_carrier",
+    "my_company",
+    "my_preload",
+    "my_engineering",
+    "my_manifest",
+];
 
 /// What init names the properties the bootloader passes.
 const BOOT_PROPS: &str = "ro.boot.";
@@ -240,6 +273,8 @@ pub fn installed_props(slot: Slot) -> Result<HashMap<String, String>> {
         let files: &[&str] = match base(m).as_str() {
             "system" => &["system/build.prop"],
             "vendor" => &["default.prop", "build.prop"],
+            // OnePlus's own partitions keep theirs at the top.
+            other if other.starts_with("my_") => &["build.prop"],
             _ => &["etc/build.prop"],
         };
         for f in files {

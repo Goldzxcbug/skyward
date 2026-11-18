@@ -1,38 +1,51 @@
-use crate::waveform::{made, share, ticks, RATE, TICKS_RATE};
 use anyhow::{anyhow, ensure, Context, Result};
 use evdev::raw_stream::RawDevice;
 use skyward_config::Strength;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "haptics/shapes.rs"]
+mod shapes;
+
 // linux/input-event-codes.h
 const EV_FF: u16 = 0x15;
 const FF_PERIODIC: u16 = 0x51;
 const FF_CUSTOM: u16 = 0x5d;
 
-/// The ticks play at this share of the drive the driver gives samples at in
-/// full, whatever the slider says: the 17 Ultra's own system plays them at
-/// 3527 mV of the 8500 mV its device tree gives.
-const TICKS_STRENGTH: f32 = 0.415;
-/// How long the ticks stay loaded once their samples have run out, as the
-/// phone's own system leaves them: the motor comes to rest on its own
-/// before taking them away brakes it.
-const TICKS_REST: Duration = Duration::from_millis(40);
+// linux/input.h: _IOW('E', nr, size)
+const fn iow(nr: u32, size: u32) -> u32 {
+    (1u32 << 30) | (size << 16) | ((b'E' as u32) << 8) | nr
+}
+const EVIOCSFF: u32 = iow(0x80, std::mem::size_of::<libc::ff_effect>() as u32);
+const EVIOCRMFF: u32 = iow(0x81, std::mem::size_of::<libc::c_int>() as u32);
+// What the kernel makes of the two on a 64-bit phone. If either stops being
+// these, the effect the driver is handed is not the one it reads.
+const _: () = assert!(EVIOCSFF == 0x4030_4580);
+const _: () = assert!(EVIOCRMFF == 0x4004_4581);
 
-/// The vibration motor, played through the kernel's force-feedback
-/// events. The driver fills its queue with a made click's samples as the
-/// click is loaded, refilling it for no second play, and keeps the click
-/// playing after its samples have run out, even when told to stop, until
-/// the click is taken away. So each click is loaded as it is played, at the
-/// strength the slider gives, and taken away once it has played out.
+/// The vibration motor, played through the kernel's force-feedback events.
+/// The driver fills its queue with a made click's samples as the click is
+/// loaded, refilling it for no second play, and keeps the click playing after
+/// its samples have run out, even when told to stop, until the click is taken
+/// away. So each click is loaded as it is played, at the strength the slider
+/// gives, and taken away once it has played out.
+///
+/// The PLK110's motor is `qcom-hv-haptics`' input device: it takes only a
+/// periodic effect whose waveform is [`FF_CUSTOM`], with the samples in the
+/// 24-byte `qcom_haptics_custom_fifo_data` the driver copies out of the
+/// caller: an index it does not use, the length in bytes, the rate, and a
+/// pointer to signed 8-bit samples. The rate is one of 8000, 16000, 24000,
+/// 32000, 44100 and 48000, and the magnitude scales the FIFO's drive, so the
+/// strength slider is what sets how hard the motor is pushed.
 pub struct Haptics {
     dev: File,
+    /// What the motor swings at, in hertz.
+    hz: f32,
     click: Click,
-    ticks: Click,
     strength: Strength,
     /// The click playing, by its slot and its count, until it is taken
     /// away; a click taken away early by the next is not taken away again.
@@ -48,6 +61,7 @@ enum Click {
     /// Samples made at the motor's resonant frequency, which the driver
     /// plays as they are, at `rate` a second.
     Samples { data: Vec<i8>, rate: u32 },
+    Made,
 }
 
 impl Haptics {
@@ -55,50 +69,57 @@ impl Haptics {
     /// fills the driver's queue with what it plays, so the click is loaded
     /// only as it is played.
     pub fn open(cfg: &skyward_config::Haptics) -> Result<Haptics> {
-        let (path, dev) = motor()?;
-        let hz = resonance(&cfg.resonance)?;
+        let (path, name, dev) = motor()?;
+        let hz = shapes::resonance(&cfg.resonance, cfg.resonance_in_hertz)?;
+        ensure!((20.0..=1000.0).contains(&hz), "the motor is said to swing at {hz} Hz, which no motor does");
         let click = match cfg.click {
             Some(id) => {
-                eprintln!("haptics {}: clicks with waveform {id}, ticks made for a motor swinging at {hz} Hz", path.display());
+                eprintln!("haptics {} ({name}): clicks with waveform {id}, ticks made for a motor swinging at {hz:.1} Hz", path.display());
                 Click::Kept(id)
             }
             None => {
-                eprintln!("haptics {}: clicks and ticks made for a motor swinging at {hz} Hz", path.display());
-                Click::Samples { data: made(hz), rate: RATE }
+                eprintln!("haptics {} ({name}): clicks and ticks made for a motor swinging at {hz:.1} Hz", path.display());
+                Click::Made
             }
         };
-        let ticks = Click::Samples { data: ticks(hz), rate: TICKS_RATE };
-        Ok(Haptics { dev, click, ticks, strength: cfg.strength, playing: Arc::new(Mutex::new(None)), clicks: 0 })
+        Ok(Haptics { dev, hz, click, strength: cfg.strength, playing: Arc::new(Mutex::new(None)), clicks: 0 })
     }
 
     /// One short click at the strength the slider's `position` gives, after
     /// taking away one still playing. Gives how long it plays.
     pub fn click(&mut self, position: f32) -> Result<Duration> {
-        self.start(false, share(&self.strength, position))
+        let click = match &self.click {
+            Click::Kept(id) => Click::Kept(*id),
+            _ => Click::Samples { data: shapes::click(self.hz, position), rate: shapes::RATE },
+        };
+        self.start(click, shapes::share(&self.strength, position))
     }
 
-    /// The ticks of the screen going off, as strong as the phone's own
-    /// system plays them whatever the slider says. Gives how long they play.
+    /// The ticks of the screen going off: two short clicks at the motor's
+    /// own frequency, the second lighter, as strong as the phone's own system
+    /// plays them whatever the slider says. Gives how long they take.
     pub fn ticks(&mut self) -> Result<Duration> {
-        self.start(true, TICKS_STRENGTH)
+        let first = self.start(Click::Samples { data: shapes::tick(self.hz), rate: shapes::RATE }, shapes::TICKS_STRENGTH)?;
+        std::thread::sleep(shapes::TICK_GAP);
+        let second = self.start(Click::Samples { data: shapes::tick(self.hz), rate: shapes::RATE }, shapes::TICKS_STRENGTH * shapes::TICK_SECOND)?;
+        Ok(first + shapes::TICK_GAP + second)
     }
 
-    /// Play the ticks, or else the click, at `share` of its full strength,
-    /// after taking away what still plays.
-    fn start(&mut self, ticks: bool, share: f32) -> Result<Duration> {
+    /// Play `click` at `share` of its full strength, after taking away what
+    /// still plays.
+    fn start(&mut self, click: Click, share: f32) -> Result<Duration> {
         let mut playing = self.playing.lock().expect("no thread panics while it holds the click playing");
         if let Some((slot, _)) = playing.take() {
             erase(&self.dev, slot).context("take away the click still playing")?;
         }
-        let effect = if ticks { &self.ticks } else { &self.click };
-        let loaded = upload(&self.dev, effect, share).context("load the click")?;
+        let loaded = upload(&self.dev, &click, share).context("load the click")?;
         play(&mut self.dev, loaded.slot).context("play the click")?;
         self.clicks += 1;
         let this = (loaded.slot, self.clicks);
         *playing = Some(this);
         drop(playing);
         let dev = self.dev.try_clone().context("share the motor")?;
-        let length = loaded.length + if ticks { TICKS_REST } else { Duration::ZERO };
+        let length = loaded.length;
         // Timed from now: a thread may wait a while before it first runs.
         let until = Instant::now() + length;
         let playing = self.playing.clone();
@@ -122,9 +143,9 @@ impl Haptics {
 pub fn probe(cfg: &skyward_config::Haptics, position: f32, ticks: bool) -> Result<()> {
     let mut haptics = Haptics::open(cfg)?;
     let (what, strength, length) = if ticks {
-        ("ticks", TICKS_STRENGTH, haptics.ticks()?)
+        ("ticks", shapes::TICKS_STRENGTH, haptics.ticks()?)
     } else {
-        ("click", share(&cfg.strength, position), haptics.click(position)?)
+        ("click", shapes::share(&cfg.strength, position), haptics.click(position)?)
     };
     // Once it has played out, what played goes with the device as the
     // command ends.
@@ -133,29 +154,46 @@ pub fn probe(cfg: &skyward_config::Haptics, position: f32, ticks: bool) -> Resul
     Ok(())
 }
 
-/// The first input device under /dev/input that takes periodic
-/// force-feedback effects, opened for writing.
-fn motor() -> Result<(PathBuf, File)> {
+/// The input device that takes made clicks, opened for writing. The PLK110
+/// has one such device, `qcom-hv-haptics` on event6; a phone may have other
+/// force-feedback devices (a uinput one, or a motor of another kind) that
+/// take a periodic effect without the driver's custom samples, so the one
+/// named for the motor is preferred and the first that takes the samples is
+/// the fallback.
+fn motor() -> Result<(PathBuf, String, File)> {
+    let mut fallback = None;
     for (path, dev) in evdev::raw_stream::enumerate() {
-        if takes_periodic(&dev) {
-            let file = OpenOptions::new().read(true).write(true).open(&path).with_context(|| format!("open {}", path.display()))?;
-            return Ok((path, file));
+        if !takes_custom(&dev) {
+            continue;
         }
+        let name = dev.name().unwrap_or("?").to_string();
+        let file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!("haptics {}: {e}", path.display());
+                continue;
+            }
+        };
+        if is_motor_name(&name) {
+            return Ok((path, name, file));
+        }
+        fallback.get_or_insert((path, name, file));
     }
-    Err(anyhow!("no input device takes force-feedback effects"))
+    fallback.ok_or_else(|| anyhow!("no input device takes the driver's custom force-feedback effects"))
 }
 
-fn takes_periodic(dev: &RawDevice) -> bool {
-    dev.supported_ff().is_some_and(|ff| ff.contains(evdev::FFEffectCode::FF_PERIODIC))
+/// Whether the device takes a periodic effect made of custom samples, which
+/// is what both the click and the ticks are. The driver advertises
+/// [`FF_PERIODIC`] and [`FF_CUSTOM`] together; one that advertises only the
+/// first would refuse the effect this motor is played with.
+fn takes_custom(dev: &RawDevice) -> bool {
+    dev.supported_ff().is_some_and(|ff| ff.contains(evdev::FFEffectCode::FF_PERIODIC) && ff.contains(evdev::FFEffectCode::FF_CUSTOM))
 }
 
-/// The motor's resonant frequency in hertz, from the file the driver says
-/// it in, in tenths of a hertz.
-fn resonance(file: &str) -> Result<f32> {
-    let text = fs::read_to_string(file).with_context(|| format!("read {file}"))?;
-    let tenths: u32 = text.split_whitespace().next().and_then(|n| n.parse().ok()).with_context(|| format!("{file} holds {text:?}"))?;
-    ensure!(tenths > 0, "{file} says the motor swings at 0 Hz");
-    Ok(tenths as f32 / 10.0)
+/// Whether a device's name says it is the phone's vibration motor.
+fn is_motor_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("haptic") || name.contains("vibrat")
 }
 
 /// A click as the driver loaded it: the slot the kernel keeps it in, and
@@ -166,7 +204,10 @@ struct Loaded {
 }
 
 /// Samples handed to the driver to play as they are, as its
-/// `custom_fifo_data` lays them out.
+/// `custom_fifo_data` lays them out. The driver reads the length at 4, the
+/// rate at 8 and the samples through the pointer at 16, and takes only a
+/// 24-byte structure: any other length it refuses, though the upload still
+/// succeeds, and nothing plays.
 #[repr(C)]
 struct Samples {
     /// Unused by the driver.
@@ -176,9 +217,15 @@ struct Samples {
     data: *const i8,
 }
 
-/// Load `click` at `share` of its full strength as a custom periodic
-/// effect in a slot of its own. The driver drives the motor at the click's
-/// highest voltage times the magnitude.
+const _: () = assert!(std::mem::size_of::<Samples>() == 24);
+const _: () = assert!(std::mem::offset_of!(Samples, index) == 0);
+const _: () = assert!(std::mem::offset_of!(Samples, length) == 4);
+const _: () = assert!(std::mem::offset_of!(Samples, rate) == 8);
+const _: () = assert!(std::mem::offset_of!(Samples, data) == 16);
+
+/// Load `click` at `share` of its full strength as a custom periodic effect
+/// in a slot of its own. The driver drives the motor at the click's samples,
+/// scaled by the magnitude.
 fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
     // The driver tells the two kinds apart by the length in bytes of what
     // the effect points to, and loads nothing for any other length, though
@@ -186,8 +233,9 @@ fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
     // waveform's number from the first of three values and writes how long
     // it plays into the other two, in whole seconds and then milliseconds.
     let mut kept: [i16; 3] = [0; 3];
-    let mut samples = Samples { index: 0, length: 0, rate: RATE, data: std::ptr::null() };
+    let mut samples = Samples { index: 0, length: 0, rate: shapes::RATE, data: std::ptr::null() };
     let (len, data) = match click {
+        Click::Made => anyhow::bail!("a made click must have samples before upload"),
         Click::Kept(id) => {
             kept[0] = *id;
             (std::mem::size_of_val(&kept), kept.as_mut_ptr())
@@ -220,13 +268,11 @@ fn upload(dev: &File, click: &Click, share: f32) -> Result<Loaded> {
     // The union holds the periodic effect; it is exactly as large.
     const _: () = assert!(std::mem::size_of::<libc::ff_periodic_effect>() == std::mem::size_of::<[u64; 4]>());
     effect.u = unsafe { std::mem::transmute::<libc::ff_periodic_effect, [u64; 4]>(periodic) };
-    // EVIOCSFF: _IOW('E', 0x80, struct ff_effect)
-    let size = std::mem::size_of::<libc::ff_effect>() as u32;
-    let request = (1u32 << 30) | (size << 16) | (u32::from(b'E') << 8) | 0x80;
-    if unsafe { libc::ioctl(dev.as_raw_fd(), request as _, &mut effect) } < 0 {
+    if unsafe { libc::ioctl(dev.as_raw_fd(), EVIOCSFF as _, &mut effect) } < 0 {
         return Err(io::Error::last_os_error().into());
     }
     let length = match click {
+        Click::Made => anyhow::bail!("a made click must have samples before upload"),
         Click::Kept(id) => {
             let [_, seconds, millis] = kept;
             let length = Duration::from_secs(u64::try_from(seconds)?) + Duration::from_millis(u64::try_from(millis)?);
@@ -248,9 +294,7 @@ fn play(dev: &mut File, id: i16) -> io::Result<()> {
 
 /// Take the effect in slot `id` away, which stops it for good.
 fn erase(dev: &File, id: i16) -> io::Result<()> {
-    // EVIOCRMFF: _IOW('E', 0x81, int)
-    let request = (1u32 << 30) | ((std::mem::size_of::<libc::c_int>() as u32) << 16) | (u32::from(b'E') << 8) | 0x81;
-    if unsafe { libc::ioctl(dev.as_raw_fd(), request as _, libc::c_int::from(id)) } < 0 {
+    if unsafe { libc::ioctl(dev.as_raw_fd(), EVIOCRMFF as _, libc::c_int::from(id)) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())

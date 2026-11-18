@@ -1,9 +1,8 @@
 name: Build
 
-# Every push is linted and tested, and the recovery is built for every
-# device in devices/, each image zipped. A tag starting with v publishes
-# those zips as a release, each shown as the phone it is for. Run by hand,
-# it can build for one device alone.
+# Every push is linted and tested. The Gold_bug fork distributes source;
+# its OnePlus image is built locally with tools/build-erhai.sh.
+# The upstream packaging jobs build and zip recoveries for releases.
 on:
   push:
     branches: ["**"]
@@ -60,6 +59,7 @@ jobs:
 
   tools:
     name: Build the recovery service and the packer
+    if: github.repository != 'Goldzxcbug/skyward'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -88,6 +88,7 @@ jobs:
 
   devices:
     name: List the devices
+    if: github.repository != 'Goldzxcbug/skyward'
     runs-on: ubuntu-24.04
     outputs:
       devices: ${{ steps.list.outputs.devices }}
@@ -168,7 +169,7 @@ jobs:
 
   release:
     name: Publish the release
-    if: github.ref_type == 'tag'
+    if: github.repository != 'Goldzxcbug/skyward' && github.ref_type == 'tag'
     needs: [tag, check, recovery]
     runs-on: ubuntu-24.04
     permissions:

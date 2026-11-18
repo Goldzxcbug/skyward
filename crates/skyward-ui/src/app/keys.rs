@@ -98,7 +98,7 @@ impl App {
         let (top, bottom) = self.band(scroll);
         let (max, n) = (self.max_scroll(), spots.len());
         let page = |k: usize| spots[k].group == Group::Page;
-        let held = |k: usize| matches!(spots[k].group, Group::Fixed | Group::Strip);
+        let held = |k: usize| matches!(spots[k].group, Group::Sidebar | Group::Fixed | Group::Strip);
         let docked = |k: usize| spots[k].group == Group::Dock;
         // The page's own controls not wholly above the band, or below it.
         let from_top = |k: usize| page(k) && self.place(&spots[k], scroll).is_some_and(|r| r.y + r.h > top);
@@ -150,6 +150,8 @@ impl App {
                         return self.scroll_on(down, &spots, cur, now);
                     }
                     self.seek_to(target, now);
+                } else if s.group == Group::Sidebar {
+                    self.reveal_sidebar(&s);
                 }
                 self.top_mut().2 = Focus::On(s);
             }
@@ -159,6 +161,9 @@ impl App {
             // its control there shows.
             To::Round => {
                 let s = spots[if down { 0 } else { n - 1 }];
+                if s.group == Group::Sidebar {
+                    self.reveal_sidebar(&s);
+                }
                 let end = if down { 0.0 } else { max };
                 let target = if self.shows(&s, end) { end } else { self.reveal(&s, end) };
                 self.seek_to(target, now);
@@ -194,7 +199,9 @@ impl App {
     fn spots(&mut self) -> Option<&[Spot]> {
         if self.spots.is_none() {
             let t = self.theme();
-            self.spots = Some(focus::spots(&t, self.frame.as_ref()?));
+            let mut spots = self.sidebar_spots();
+            spots.extend(focus::spots(&t, self.frame.as_ref()?));
+            self.spots = Some(spots);
         }
         self.spots.as_deref()
     }
@@ -219,10 +226,13 @@ impl App {
     /// The first of the page's own controls in view at `scroll`, or else
     /// the bottom strip's first, or else the `<` or the top strip's first.
     fn first_in_view(&self, spots: &[Spot], scroll: f32) -> Option<usize> {
+        if self.stack.len() == 1 && let Some(i) = spots.iter().position(|s| s.group == Group::Sidebar) {
+            return Some(i);
+        }
         let band = self.band(scroll);
         let k = spots.iter().position(|s| s.group == Group::Page && self.place(s, scroll).is_some_and(|r| within(r, band)));
         k.or_else(|| spots.iter().position(|s| s.group == Group::Dock))
-            .or_else(|| spots.iter().position(|s| matches!(s.group, Group::Fixed | Group::Strip)))
+            .or_else(|| spots.iter().position(|s| matches!(s.group, Group::Sidebar | Group::Fixed | Group::Strip)))
     }
 
     /// Where on screen `s` is with the page `offset` pixels down; nowhere
@@ -230,6 +240,7 @@ impl App {
     pub(super) fn place(&self, s: &Spot, offset: f32) -> Option<Rect> {
         let fr = self.frame.as_ref().expect("a control is placed on the page drawn");
         let dy = match s.group {
+            Group::Sidebar => return Some(self.sidebar_position(s)),
             Group::Fixed => 0.0,
             Group::Strip => pinned_top(&self.theme(), fr.pinned.as_ref().expect("the strip holds its controls"), offset),
             Group::Page => return fr.shown(s.rect, offset),

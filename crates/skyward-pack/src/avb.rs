@@ -6,7 +6,7 @@
 //! anything but a vbmeta image, as a stock footer left behind an image
 //! written over the start of the partition does.
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use sha2::{Digest, Sha256};
 
 /// The unit avbtool lays an image and its vbmeta image out in.
@@ -16,12 +16,31 @@ const HEADER_LEN: usize = 256;
 const TAG_HASH: u64 = 2;
 const RELEASE: &[u8] = b"skyward-pack";
 
+/// Anti-rollback fields from the original recovery's vbmeta header.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rollback {
+    pub index: u64,
+    pub location: u32,
+}
+
 /// `image` grown to fill a `partition_size`-byte partition named
 /// `partition`: the image, its vbmeta image from the next block on, and the
 /// footer locating that in the partition's last bytes, zeros between.
-pub fn footed(image: &[u8], partition: &str, partition_size: usize, salt: &[u8]) -> Result<Vec<u8>> {
-    let digest = Sha256::new().chain_update(salt).chain_update(image).finalize();
-    let vbmeta = vbmeta(&hash_descriptor(image.len() as u64, partition, salt, &digest));
+pub fn footed(
+    image: &[u8],
+    partition: &str,
+    partition_size: usize,
+    salt: &[u8],
+    rollback: Rollback,
+) -> Result<Vec<u8>> {
+    let digest = Sha256::new()
+        .chain_update(salt)
+        .chain_update(image)
+        .finalize();
+    let vbmeta = vbmeta(
+        &hash_descriptor(image.len() as u64, partition, salt, &digest),
+        rollback,
+    );
     let offset = image.len().next_multiple_of(BLOCK);
     let end = offset + vbmeta.len().next_multiple_of(BLOCK);
     ensure!(
@@ -71,26 +90,26 @@ fn hash_descriptor(image_size: u64, partition: &str, salt: &[u8], digest: &[u8])
 
 /// An unsigned vbmeta image holding `descriptors`: its header, an empty
 /// authentication block and the descriptors as its auxiliary block.
-fn vbmeta(descriptors: &[u8]) -> Vec<u8> {
+fn vbmeta(descriptors: &[u8], rollback: Rollback) -> Vec<u8> {
     let aux = descriptors.len().next_multiple_of(64);
     let mut v = Vec::with_capacity(HEADER_LEN + aux);
     v.extend_from_slice(b"AVB0");
-    // The libavb version it needs, 1.0.
+    // A nonzero rollback location was introduced in libavb 1.2.
     v.extend_from_slice(&1u32.to_be_bytes());
-    v.extend_from_slice(&0u32.to_be_bytes());
+    v.extend_from_slice(&(if rollback.location == 0 { 0u32 } else { 2u32 }).to_be_bytes());
     v.extend_from_slice(&0u64.to_be_bytes());
     v.extend_from_slice(&(aux as u64).to_be_bytes());
     // No signing algorithm.
     v.extend_from_slice(&0u32.to_be_bytes());
     // The offsets and sizes of the hash, the signature, the public key, its
     // metadata and the descriptors, then the rollback index.
-    let n = descriptors.len();
-    for field in [0, 0, 0, 0, n, 0, n, 0, 0, n, 0] {
-        v.extend_from_slice(&(field as u64).to_be_bytes());
+    let n = descriptors.len() as u64;
+    for field in [0, 0, 0, 0, n, 0, n, 0, 0, n, rollback.index] {
+        v.extend_from_slice(&field.to_be_bytes());
     }
     // The flags and the rollback index location.
     v.extend_from_slice(&0u32.to_be_bytes());
-    v.extend_from_slice(&0u32.to_be_bytes());
+    v.extend_from_slice(&rollback.location.to_be_bytes());
     v.extend_from_slice(RELEASE);
     v.resize(HEADER_LEN, 0);
     v.extend_from_slice(descriptors);
@@ -118,7 +137,14 @@ mod tests {
     #[test]
     fn the_footer_is_avbtools_byte_for_byte() {
         for len in [4096, 1000] {
-            let got = footed(&vec![b'S'; len], "recovery", 81920, &SALT).unwrap();
+            let got = footed(
+                &vec![b'S'; len],
+                "recovery",
+                81920,
+                &SALT,
+                Rollback::default(),
+            )
+            .unwrap();
             assert!(got == avbtool(len), "a {len}-byte image");
         }
     }
@@ -126,7 +152,48 @@ mod tests {
     #[test]
     fn an_image_that_leaves_no_room_for_its_vbmeta_and_footer_is_refused() {
         let image = vec![b'S'; 8192];
-        assert!(footed(&image, "recovery", 16384, &SALT).is_ok(), "a block each for the vbmeta image and the footer");
-        assert!(footed(&image, "recovery", 12288, &SALT).is_err());
+        assert!(
+            footed(&image, "recovery", 16384, &SALT, Rollback::default()).is_ok(),
+            "a block each for the vbmeta image and the footer"
+        );
+        assert!(footed(&image, "recovery", 12288, &SALT, Rollback::default()).is_err());
+    }
+
+    #[test]
+    fn the_new_digest_keeps_the_stock_rollback_fields() {
+        let image = b"replacement recovery";
+        let out = footed(
+            image,
+            "recovery",
+            16384,
+            &SALT,
+            Rollback {
+                index: 17,
+                location: 3,
+            },
+        )
+        .unwrap();
+        let offset =
+            u64::from_be_bytes(out[out.len() - 44..out.len() - 36].try_into().unwrap()) as usize;
+        assert_eq!(&out[offset..offset + 4], b"AVB0");
+        assert_eq!(
+            u32::from_be_bytes(out[offset + 8..offset + 12].try_into().unwrap()),
+            2
+        );
+        assert_eq!(
+            u64::from_be_bytes(out[offset + 112..offset + 120].try_into().unwrap()),
+            17
+        );
+        assert_eq!(
+            u32::from_be_bytes(out[offset + 124..offset + 128].try_into().unwrap()),
+            3
+        );
+        let descriptors = offset + HEADER_LEN;
+        let digest = Sha256::new()
+            .chain_update(SALT)
+            .chain_update(image)
+            .finalize();
+        let digest_at = descriptors + 132 + "recovery".len() + SALT.len();
+        assert_eq!(&out[digest_at..digest_at + digest.len()], &digest[..]);
     }
 }

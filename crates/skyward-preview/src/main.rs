@@ -142,6 +142,9 @@ fn main() -> Result<()> {
     for (tag, min, def, max) in fonts.axes() {
         eprintln!("axis {tag}: {min}..{max} (default {def})");
     }
+    if args.iter().any(|arg| arg == "--tablet") {
+        return tablet_preview(&root, &out, &fonts);
+    }
 
     let cfg = DeviceConfig::load(root.join("devices/nezha.toml"))?;
     let (w, h) = (cfg.display.width, cfg.display.height);
@@ -1564,6 +1567,55 @@ fn nezha(cfg: &DeviceConfig) -> DeviceInfo {
         snapshot: SnapshotState::None,
         boot: Boot { unlocked: Some(true), verified: Some("orange".into()) },
     }
+}
+
+/// Draw the regular recovery entry point at the Erhai panel's native size.
+fn tablet_preview(root: &Path, out: &Path, fonts: &Fonts) -> Result<()> {
+    let cfg = DeviceConfig::load(root.join("devices/erhai.toml"))?;
+    let w = cfg.display.width.max(cfg.display.height);
+    let h = cfg.display.width.min(cfg.display.height);
+    let ppd = cfg.display.density as f32 / 160.0;
+    let info = DeviceInfo {
+        model: cfg.device.model.clone(),
+        codename: cfg.device.codename,
+        soc: cfg.device.soc,
+        cpu: Cpu { cores: 8, max_khz: None },
+        ram_kib: 16 * 1024 * 1024,
+        panel: Some((w, h)),
+        screen: cfg.display.diagonal,
+        os_version: Some("OPD2413_16.0.7.200(CN01)".into()),
+        android: Some("16".into()),
+        locale: None,
+        security_patch: None,
+        kernel: "6.6.89".into(),
+        storage: Storage { total: 512_000_000_000, free: None },
+        battery: Some(Battery {
+            level: 100,
+            charge: Charge::Full,
+            temp: None,
+            health: None,
+            cycles: None,
+            design: None,
+            full: None,
+            voltage: None,
+            quick: false,
+            plugged: true,
+        }),
+        slot: Some(Slot::A),
+        snapshot: SnapshotState::None,
+        boot: Boot { unlocked: Some(true), verified: None },
+    };
+    for (dark, file) in [(false, "tablet-device.png"), (true, "tablet-device-dark.png")] {
+        let mut app = opened(Screen::Home, w, h, ppd);
+        app.state.dark = dark;
+        app.state.wlan = Some(joined(Joining::Connected(router_link())));
+        let mut canvas = Canvas::new(w, h);
+        app.compose(&mut canvas, fonts, &info, CLOCK, 0);
+        let path = out.join(file);
+        write_png(&path, &canvas)?;
+        println!("wrote {}", path.display());
+    }
+    Ok(())
 }
 
 /// Weight ladders for matching stroke widths against device screenshots: the

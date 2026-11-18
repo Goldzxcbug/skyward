@@ -11,6 +11,8 @@ use std::io::{self, ErrorKind};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 
+mod coordinates;
+
 pub enum Event {
     /// A touch and when the panel reported it, on [`monotonic_ms`]'s clock.
     Touch(Touch, u64),
@@ -130,7 +132,7 @@ impl Panel {
         Ok(())
     }
 
-    fn read(&mut self, w: f32, h: f32, out: &mut Vec<Event>) -> io::Result<()> {
+    fn read(&mut self, w: f32, h: f32, rotation: u16, out: &mut Vec<Event>) -> io::Result<()> {
         let events: Vec<InputEvent> = match self.dev.fetch_events() {
             Ok(events) => events.collect(),
             Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
@@ -146,9 +148,7 @@ impl Panel {
                     }
                     let time = e.as_ref().time;
                     let at = time.tv_sec as u64 * 1000 + time.tv_usec as u64 / 1000;
-                    let span = |r: (i32, i32)| (r.1 - r.0).max(1) as f32;
-                    let x = (self.raw.0 - self.x_range.0) as f32 / span(self.x_range) * w;
-                    let y = (self.raw.1 - self.y_range.0) as f32 / span(self.y_range) * h;
+                    let (x, y) = coordinates::map(self.raw, self.x_range, self.y_range, w, h, rotation);
                     match (self.was_down, self.down) {
                         (false, true) => out.push(Event::Touch(Touch::Down(x, y), at)),
                         (true, true) if self.moved => out.push(Event::Touch(Touch::Move(x, y), at)),
@@ -189,12 +189,14 @@ pub struct Inputs {
     seen: HashSet<PathBuf>,
     /// What the touchscreen is told each time its panel is taken in.
     touch_writes: Vec<Write>,
+    /// Sensor-to-native-display rotation, retained when the panel reappears.
+    rotation: u16,
     w: f32,
     h: f32,
 }
 
 impl Inputs {
-    pub fn open(w: u32, h: u32, touch_writes: Vec<Write>) -> Result<Self> {
+    pub fn open(w: u32, h: u32, touch_writes: Vec<Write>, rotation: u16) -> Result<Self> {
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         if fd < 0 {
             return Err(io::Error::last_os_error()).context("create inotify instance");
@@ -215,6 +217,7 @@ impl Inputs {
             buttons: Vec::new(),
             seen: HashSet::new(),
             touch_writes,
+            rotation,
             w: w as f32,
             h: h as f32,
         };
@@ -292,7 +295,7 @@ impl Inputs {
         }
         let mut out = Vec::new();
         if let Some(panel) = &mut self.panel {
-            match panel.read(self.w, self.h, &mut out) {
+            match panel.read(self.w, self.h, self.rotation, &mut out) {
                 Ok(()) => {}
                 Err(e) if gone(&e) => {
                     eprintln!("input {}: removed", panel.path.display());

@@ -137,6 +137,7 @@ pub fn confirm_label(which: Confirm, s: &State) -> (&'static str, bool) {
         Confirm::SwitchSystem => (["滑动以切换并重启", "滑動以切換並重新啟動", "Slide to switch and reboot"], false),
         Confirm::RemoveSystem => (["滑动以删除", "滑動以刪除", "Slide to remove"], true),
         Confirm::InstallSystem => (INSTALL, false),
+        Confirm::ForgetNetwork => (["滑动以忘记网络", "滑動以忘記網路", "Slide to forget the network"], true),
     };
     (s.lang.pick(label), danger)
 }
@@ -170,11 +171,50 @@ const UPDATE: Text = ["系统更新", "系統更新", "System update"];
 const SKYWARD_UPDATE: Text = ["Skyward 更新", "Skyward 更新", "Skyward update"];
 const FILES: Text = ["文件管理", "檔案管理", "File manager"];
 const TERMINAL: Text = ["终端", "終端機", "Terminal"];
+const NO_SPLASH: Text = ["跳过启动画面", "跳過啟動畫面", "Skip startup screen"];
 const LANGUAGE: Text = ["语言", "語言", "Language"];
 const TIME_ZONE: Text = ["时区", "時區", "Time zone"];
 const LICENSE: Text = ["开源许可", "開放原始碼授權", "Open source licenses"];
 const FONTS: Text = ["界面字体", "介面字型", "UI fonts"];
 const DUAL_BOOT: Text = ["双系统", "雙系統", "Dual boot"];
+
+pub(crate) const MY_DEVICE: Text = ["我的设备", "我的裝置", "My device"];
+
+#[derive(Clone, Copy)]
+pub(crate) struct HomeEntry {
+    pub screen: Screen,
+    pub title: Text,
+    pub tile: (Rgba, Icon),
+}
+
+impl HomeEntry {
+    const fn new(screen: Screen, title: Text, color: Rgba, icon: Icon) -> Self {
+        Self { screen, title, tile: (color, icon) }
+    }
+
+    fn row(self, lang: Lang) -> Row<'static> {
+        Row::new(lang.pick(self.title)).icon(self.tile.0, self.tile.1)
+    }
+}
+
+pub(crate) const HOME_DEVICE: [HomeEntry; 1] = [HomeEntry::new(Screen::About, MY_DEVICE, BLUE, Icon::Phone)];
+pub(crate) const HOME_CONNECTIONS: [HomeEntry; 2] = [
+    HomeEntry::new(Screen::Wlan, WLAN, BLUE, Icon::Wlan),
+    HomeEntry::new(Screen::Systems, DUAL_BOOT, PURPLE, Icon::Systems),
+];
+pub(crate) const HOME_TOOLS: [HomeEntry; 5] = [
+    HomeEntry::new(Screen::Install, ["安装", "安裝", "Install"], GREEN, Icon::Install),
+    HomeEntry::new(Screen::Backup, ["备份", "備份", "Backup"], BLUE, Icon::Backup),
+    HomeEntry::new(Screen::Restore, ["恢复", "還原", "Restore"], PURPLE, Icon::Restore),
+    HomeEntry::new(Screen::Mount, ["挂载", "掛載", "Mount"], SLATE, Icon::Mount),
+    HomeEntry::new(Screen::Decrypt, DECRYPT, BLUE, Icon::Lock),
+];
+pub(crate) const HOME_SYSTEM: [HomeEntry; 4] = [
+    HomeEntry::new(Screen::Wipe, ["清除数据", "清除資料", "Wipe data"], RED, Icon::Wipe),
+    HomeEntry::new(Screen::Advanced, ADVANCED, SLATE, Icon::More),
+    HomeEntry::new(Screen::Settings, SETTINGS, SLATE, Icon::Gear),
+    HomeEntry::new(Screen::Reboot, REBOOT, ORANGE, Icon::Power),
+];
 
 /// A canvas for a page `h` tall in the colour `bg`, holding the rows `cx`
 /// asks to be drawn.
@@ -209,6 +249,57 @@ fn hits(rects: &[Rect], actions: &[Action]) -> Vec<Hit> {
     rects.iter().zip(actions).map(|(&rect, &action)| Hit { rect, action }).collect()
 }
 
+struct HomeNotice {
+    title: String,
+    detail: String,
+    icon: (Rgba, Icon),
+    screen: Option<Screen>,
+}
+
+impl HomeNotice {
+    fn row(&self) -> Row<'_> {
+        let (color, icon) = self.icon;
+        let trail = if self.screen.is_some() { Trail::Arrow } else { Trail::None };
+        Row::new(&self.title).icon(color, icon).subtitle(&self.detail).trail(trail)
+    }
+}
+
+fn home_notices(cx: &Ctx) -> Vec<HomeNotice> {
+    let (info, state, lang) = (cx.info, cx.state, cx.state.lang);
+    let mut notices = Vec::new();
+    if let Some(Refusal::Battery { level, charging }) = info.battery.as_ref().and_then(skyward_install::battery_refusal) {
+        let (title, detail) = fmt::battery_low(lang, level, charging);
+        notices.push(HomeNotice { title, detail, icon: (RED, Icon::Battery), screen: None });
+    }
+    if let Some(note) = fmt::snapshot_note(lang, &info.snapshot) {
+        notices.push(HomeNotice {
+            title: fmt::snapshot(lang, &info.snapshot).into(),
+            detail: note.into(),
+            icon: (ORANGE, Icon::Layers),
+            screen: Some(Screen::Update),
+        });
+    }
+    if let (Some(now), Some(Ok(slots))) = (info.slot, &state.boot_slots) && slots.active != now {
+        let (title, detail) = fmt::next_boot(lang, slots.active, now);
+        notices.push(HomeNotice { title, detail, icon: (ORANGE, Icon::Power), screen: Some(Screen::Slot) });
+    }
+    if state.system_notice.is_some() {
+        notices.push(HomeNotice {
+            title: lang.pick(SECOND_FAILED).into(),
+            detail: lang.pick(["点按查看原因", "點按查看原因", "Tap to see why"]).into(),
+            icon: (RED, Icon::Systems),
+            screen: Some(Screen::Systems),
+        });
+    }
+    notices
+}
+
+fn notice_hits(rows: &[Rect], notices: &[HomeNotice]) -> impl Iterator<Item = Hit> {
+    rows.iter().zip(notices).filter_map(|(&rect, notice)| {
+        notice.screen.map(|screen| Hit { rect, action: Action::Open(screen) })
+    })
+}
+
 /// Recovery home, laid out like the Settings root: title, search, a device
 /// card, then grouped entries. The status bar carries the readings: the
 /// slot, the data partition's lock and the battery's temperature.
@@ -231,36 +322,11 @@ pub fn home(cx: &Ctx) -> Frame {
     // Under the phone's name the card holds only what asks for something to
     // be done: a battery too low to install on, an update waiting to merge,
     // and a restart into the slot the system does not run from now.
-    let low = match i.battery.as_ref().and_then(skyward_install::battery_refusal) {
-        Some(Refusal::Battery { level, charging }) => Some(fmt::battery_low(l, level, charging)),
-        _ => None,
-    };
-    let next = match (i.slot, &cx.state.boot_slots) {
-        (Some(now), Some(Ok(slots))) if slots.active != now => Some(fmt::next_boot(l, slots.active, now)),
-        _ => None,
-    };
-    let mut rows = Vec::new();
-    let mut opens = Vec::new();
-    if let Some((title, note)) = &low {
-        rows.push(Row::new(title).icon(RED, Icon::Battery).subtitle(note).trail(Trail::None));
-        opens.push(None);
-    }
-    if let Some(note) = fmt::snapshot_note(l, &i.snapshot) {
-        rows.push(Row::new(fmt::snapshot(l, &i.snapshot)).icon(ORANGE, Icon::Layers).subtitle(note).trail(Trail::Arrow));
-        opens.push(Some(Action::Open(Screen::Update)));
-    }
-    if let Some((title, note)) = &next {
-        rows.push(Row::new(title).icon(ORANGE, Icon::Power).subtitle(note).trail(Trail::Arrow));
-        opens.push(Some(Action::Open(Screen::Slot)));
-    }
-    if cx.state.system_notice.is_some() {
-        let why = l.pick(["点按查看原因", "點按查看原因", "Tap to see why"]);
-        rows.push(Row::new(l.pick(SECOND_FAILED)).icon(RED, Icon::Systems).subtitle(why).trail(Trail::Arrow));
-        opens.push(Some(Action::Open(Screen::Systems)));
-    }
+    let notices = home_notices(cx);
+    let rows: Vec<_> = notices.iter().map(HomeNotice::row).collect();
     let card = widgets::device_card(&mut c, t, f, y, &i.model, &sub, &rows);
     out.push(Hit { rect: card.rows[0], action: Action::Open(Screen::About) });
-    out.extend(card.rows[1..].iter().zip(&opens).filter_map(|(&rect, open)| open.map(|action| Hit { rect, action })));
+    out.extend(notice_hits(&card.rows[1..], &notices));
     y = card.bottom + t.m.card_gap;
     // On a phone whose WLAN the recovery brings up, the WLAN comes first
     // under the device, as on the stock settings home; with it, where the
@@ -268,12 +334,12 @@ pub fn home(cx: &Ctx) -> Frame {
     let mut rows = Vec::new();
     let mut opens = Vec::new();
     if let Some(w) = &cx.state.wlan {
-        rows.push(Row::new(l.pick(WLAN)).icon(BLUE, Icon::Wlan).trail(Trail::Value(fmt::wlan_value(l, w))));
+        rows.push(HOME_CONNECTIONS[0].row(l).trail(Trail::Value(fmt::wlan_value(l, w))));
         opens.push(Action::Open(Screen::Wlan));
     }
     let starts = systems_value(cx);
     if cx.state.offers(Screen::Systems) {
-        let row = Row::new(l.pick(DUAL_BOOT)).icon(PURPLE, Icon::Systems);
+        let row = HOME_CONNECTIONS[1].row(l);
         rows.push(match &starts {
             Some(value) => row.trail(Trail::Value(value)),
             None => row,
@@ -285,34 +351,20 @@ pub fn home(cx: &Ctx) -> Frame {
         out.extend(hits(&first.rows, &opens));
         y = first.bottom + t.m.card_gap;
     }
-    let tools = widgets::list(&mut c, t, f, y, &[
-        Row::new(l.pick(["安装", "安裝", "Install"])).icon(GREEN, Icon::Install),
-        Row::new(l.pick(["备份", "備份", "Backup"])).icon(BLUE, Icon::Backup),
-        Row::new(l.pick(["恢复", "還原", "Restore"])).icon(PURPLE, Icon::Restore),
-        Row::new(l.pick(["挂载", "掛載", "Mount"])).icon(SLATE, Icon::Mount),
-        Row::new(l.pick(DECRYPT)).icon(BLUE, Icon::Lock).trail(Trail::Value(fmt::data(l, &cx.state.data))),
-    ]);
-    out.extend(hits(&tools.rows, &[
-        Action::Open(Screen::Install),
-        Action::Open(Screen::Backup),
-        Action::Open(Screen::Restore),
-        Action::Open(Screen::Mount),
-        Action::Open(Screen::Decrypt),
-    ]));
+    let rows = HOME_TOOLS.map(|entry| {
+        let row = entry.row(l);
+        if entry.screen == Screen::Decrypt { row.trail(Trail::Value(fmt::data(l, &cx.state.data))) } else { row }
+    });
+    let tools = widgets::list(&mut c, t, f, y, &rows);
+    out.extend(hits(&tools.rows, &HOME_TOOLS.map(|entry| Action::Open(entry.screen))));
     y = tools.bottom + t.m.card_gap;
     let target = l.pick(REBOOT_TARGETS[cx.state.reboot].0);
-    let system = widgets::list(&mut c, t, f, y, &[
-        Row::new(l.pick(["清除数据", "清除資料", "Wipe data"])).icon(RED, Icon::Wipe),
-        Row::new(l.pick(ADVANCED)).icon(SLATE, Icon::More),
-        Row::new(l.pick(SETTINGS)).icon(SLATE, Icon::Gear),
-        Row::new(l.pick(REBOOT)).icon(ORANGE, Icon::Power).trail(Trail::Value(target)),
-    ]);
-    out.extend(hits(&system.rows, &[
-        Action::Open(Screen::Wipe),
-        Action::Open(Screen::Advanced),
-        Action::Open(Screen::Settings),
-        Action::Open(Screen::Reboot),
-    ]));
+    let rows = HOME_SYSTEM.map(|entry| {
+        let row = entry.row(l);
+        if entry.screen == Screen::Reboot { row.trail(Trail::Value(target)) } else { row }
+    });
+    let system = widgets::list(&mut c, t, f, y, &rows);
+    out.extend(hits(&system.rows, &HOME_SYSTEM.map(|entry| Action::Open(entry.screen))));
     // However little it holds, the page scrolls far enough to fold its bar
     // away.
     let height = fitted(t, system.bottom).max(t.m.h + fold.span.ceil() as u32);
@@ -374,8 +426,12 @@ pub fn settings(cx: &Ctx) -> Frame {
     let general = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
+        Row::new(l.pick(NO_SPLASH)).trail(Trail::Switch(s.no_splash)),
     ]);
-    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone)]));
+    out.extend(hits(
+        &general.rows,
+        &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone), Action::Toggle(Switch::NoSplash)],
+    ));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));
@@ -520,13 +576,22 @@ const AUTHOR: &str = "© 2026 Kirk Lin";
 /// hardware and link cards scrolling over it. Only the cards are drawn
 /// here; the canvas is clear wherever the field shows.
 pub fn about(cx: &Ctx) -> Frame {
+    about_page(cx, None)
+}
+
+pub(crate) fn tablet_overview(cx: &Ctx, back: bool) -> Frame {
+    about_page(cx, Some(back))
+}
+
+fn about_page(cx: &Ctx, tablet_back: Option<bool>) -> Frame {
     let (t, f) = (cx.t, cx.f);
     let m = &t.m;
     // The page is drawn whole, under the field: laid out first to learn
     // how tall it comes to, then drawn that tall.
-    let (_, _, bottom) = about_cards(cx, &mut Canvas::band(m.w, m.h * 3, 0..0, 0..0, Rgba { r: 0, g: 0, b: 0, a: 0 }));
+    let notices = tablet_back.map(|_| home_notices(cx)).unwrap_or_default();
+    let (_, _, bottom) = about_cards(cx, &mut Canvas::band(m.w, m.h * 3, 0..0, 0..0, Rgba { r: 0, g: 0, b: 0, a: 0 }), &notices);
     let mut c = Canvas::new(m.w, fitted(t, bottom));
-    let (out, summary_top, bottom) = about_cards(cx, &mut c);
+    let (out, summary_top, bottom) = about_cards(cx, &mut c, &notices);
     let canvas = fit(c, t, bottom);
     let art = HeroArt {
         wordmark: widgets::wordmark(t, f, "Skyward", m.dp(233.7), m.dp(37.8)),
@@ -534,7 +599,8 @@ pub fn about(cx: &Ctx) -> Frame {
         author: widgets::author_line(t, f, AUTHOR),
         runs: canvas.runs(),
     };
-    Frame { header: false, hero: Some(art), ..Frame::new(t, canvas, out, cx.state.lang.pick(ABOUT), summary_top) }
+    let title = cx.state.lang.pick(if tablet_back.is_some() { MY_DEVICE } else { ABOUT });
+    Frame { back: tablet_back.unwrap_or(true), header: false, hero: Some(art), ..Frame::new(t, canvas, out, title, summary_top) }
 }
 
 const MODEL: Text = ["设备型号", "裝置型號", "Model"];
@@ -556,7 +622,7 @@ fn soc(l: Lang, i: &DeviceInfo) -> Option<&str> {
 
 /// The About page's cards on `c`: what touching them does, where the
 /// first starts, and where the last ends.
-fn about_cards(cx: &Ctx, c: &mut Canvas) -> (Vec<Hit>, f32, f32) {
+fn about_cards(cx: &Ctx, c: &mut Canvas, notices: &[HomeNotice]) -> (Vec<Hit>, f32, f32) {
     let (t, f, i, l) = (cx.t, cx.f, cx.info, cx.state.lang);
     let m = &t.m;
     let tone = Tone::hero(t);
@@ -575,6 +641,13 @@ fn about_cards(cx: &Ctx, c: &mut Canvas) -> (Vec<Hit>, f32, f32) {
     }
     let summary = widgets::facts(c, t, f, m.dp(490.7), &facts, &tone);
     out.push(Hit { rect: summary.rows[1], action: Action::Open(Screen::Specs) });
+    let mut y = summary.bottom + m.card_gap;
+    if !notices.is_empty() {
+        let rows: Vec<_> = notices.iter().map(HomeNotice::row).collect();
+        let card = widgets::list_toned(c, t, f, y, &rows, &tone);
+        out.extend(notice_hits(&card.rows, notices));
+        y = card.bottom + m.card_gap;
+    }
 
     let processor = soc(l, i).map_or_else(|| fmt::cpu(l, &i.cpu), str::to_string);
     let mut specs = vec![(l.pick(PROCESSOR), processor), (l.pick(RAM), fmt::ram(i.ram_kib))];
@@ -587,7 +660,7 @@ fn about_cards(cx: &Ctx, c: &mut Canvas) -> (Vec<Hit>, f32, f32) {
     if let Some(p) = i.panel {
         specs.push((l.pick(RESOLUTION), fmt::panel(p)));
     }
-    let y = widgets::spec_card(c, t, f, summary.bottom + m.card_gap, &fmt::model_lines(&i.model), &specs, &tone);
+    let y = widgets::spec_card(c, t, f, y, &fmt::model_lines(&i.model), &specs, &tone);
     let links = widgets::list_toned(c, t, f, y + m.card_gap, &[Row::new(l.pick(SPECS)), Row::new(l.pick(LOGS))], &tone);
     out.extend(hits(&links.rows, &[Action::Open(Screen::Specs), Action::Open(Screen::Logs)]));
     (out, summary.rows[0].y, links.bottom)
@@ -2880,8 +2953,14 @@ pub fn wlan(cx: &Ctx) -> Frame {
     let mut out = Vec::new();
     let top = t.m.content_top;
     let on = !matches!(w.power, Power::Off | Power::Failed(_));
-    let switch = widgets::list(&mut c, t, f, top, &[Row::new(l.pick(WLAN)).trail(Trail::Switch(on))]);
-    out.extend(hits(&switch.rows, &[Action::Toggle(Switch::Wlan)]));
+    let switch = widgets::list(
+        &mut c,
+        t,
+        f,
+        top,
+        &[Row::new(l.pick(WLAN)).trail(Trail::Switch(on)), Row::new(l.pick(REMEMBER_WLAN)).trail(Trail::Switch(s.remember_wlan))],
+    );
+    out.extend(hits(&switch.rows, &[Action::Toggle(Switch::Wlan), Action::Toggle(Switch::RememberWlan)]));
     let mut y = switch.bottom;
     match &w.power {
         Power::Off => {
@@ -2956,10 +3035,47 @@ pub fn wlan(cx: &Ctx) -> Frame {
                 out.push(Hit { rect: widgets::round_button(t, *rect), action: Action::NetworkDetails(*k) });
             }
             y = list.bottom;
+            // What the phone keeps is not what the scan found: a network
+            // kept is one it has joined, so it is listed apart, with no
+            // signal to show and a button that forgets it. The row is not
+            // drawn as joined or in range, and nothing is removed here
+            // until the runtime says the password is gone.
+            if !s.saved.is_empty() {
+                let y2 = widgets::section(&mut c, t, f, y, l.pick(SAVED_NETWORKS));
+                let kept: Vec<Row> = s
+                    .saved
+                    .iter()
+                    .map(|n| Row::new(&n.name).subtitle(fmt::security(l, n.security)).trail(Trail::Network { locked: locked(n.security) }))
+                    .collect();
+                let kept = widgets::list(&mut c, t, f, y2, &kept);
+                for (rect, i) in kept.rows.iter().zip(0..s.saved.len()) {
+                    out.push(Hit { rect: widgets::round_button(t, *rect), action: Action::ForgetSaved(i) });
+                }
+                y = kept.bottom;
+            }
+            // The swipe that asks whether it is meant stands under the
+            // list, never over it, so nothing but the swipe itself can
+            // forget.
+            if let Some(name) = &s.forget_pending {
+                let what = tr!(
+                    l,
+                    "忘记「{name}」？手机将不再自动连接它，密码也不再保留。",
+                    "忘記「{name}」？手機將不再自動連線它，密碼也不再保留。",
+                    "Forget “{name}”? The phone will no longer join it by itself, and its password won't be kept."
+                );
+                let note = widgets::footnote(&mut c, t, f, y, &what);
+                let (label, danger) = confirm_label(Confirm::ForgetNetwork, s);
+                let track = widgets::confirm(&mut c, t, f, note + t.m.dp(24.0), label, danger, s.confirm);
+                out.push(Hit { rect: track, action: Action::Confirm(Confirm::ForgetNetwork) });
+                y = track.y + track.h;
+            }
         }
     }
     Frame::new(t, fit(c, t, y), out, l.pick(WLAN), top)
 }
+
+const SAVED_NETWORKS: Text = ["已保存的网络", "已儲存的網路", "Saved networks"];
+const REMEMBER_WLAN: Text = ["记住网络", "記住網路", "Remember networks"];
 
 const ADD_NETWORK: Text = ["添加网络", "新增網路", "Add network"];
 const SHOW_PASSWORD: Text = ["显示密码", "顯示密碼", "Show password"];
@@ -3077,8 +3193,25 @@ pub fn wlan_network(cx: &Ctx) -> Frame {
     }
     let y = widgets::detail_grid(&mut c, t, f, y, &items);
     let forget = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(l.pick(["删除网络", "刪除網路", "Forget network"])).tint(t.pal.danger).trail(Trail::None)]);
-    out.extend(hits(&forget.rows, &[Action::LeaveNetwork]));
-    Frame::new(t, fit(c, t, forget.bottom), out, title, top)
+    out.extend(hits(&forget.rows, &[Action::ForgetNetwork]));
+    let mut bottom = forget.bottom;
+    // Forgetting takes the password kept for it away, so it is asked for
+    // with a swipe rather than a tap; the page under says what is left.
+    if s.asking_delete {
+        let name = &network.name;
+        let what = tr!(
+            l,
+            "忘记「{name}」？手机将不再自动连接它，密码也不再保留。",
+            "忘記「{name}」？手機將不再自動連線它，密碼也不再保留。",
+            "Forget “{name}”? The phone will no longer join it by itself, and its password won't be kept."
+        );
+        let note = widgets::footnote(&mut c, t, f, forget.bottom, &what);
+        let (label, danger) = confirm_label(Confirm::ForgetNetwork, s);
+        let track = widgets::confirm(&mut c, t, f, note + t.m.dp(24.0), label, danger, s.confirm);
+        out.push(Hit { rect: track, action: Action::Confirm(Confirm::ForgetNetwork) });
+        bottom = track.y + track.h;
+    }
+    Frame::new(t, fit(c, t, bottom), out, title, top)
 }
 
 /// The file manager, every entry of the folder shown, folders first.

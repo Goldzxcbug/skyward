@@ -29,6 +29,11 @@ pub enum Switch {
     Wlan,
     /// Show the password typed rather than a dot for each character.
     ShowPassword,
+    /// Keep the network joined, with its password, so that the recovery
+    /// joins it by itself at the next start.
+    RememberWlan,
+    /// Do not draw the first screen, and come up at once.
+    NoSplash,
 }
 
 /// How long the screen stays on with nothing touched, in milliseconds, in
@@ -100,6 +105,19 @@ mod tests {
         assert_eq!(tap_at(&mut app, &f, &i, Action::Toggle(Switch::FileTransfer), 3000), [Effect::FileTransfer(true)]);
         app.file_transfer_failed(false, "无法开启文件传输", 4000);
         assert!(!app.state.file_transfer, "the switch shows how it stands");
+    }
+
+    #[test]
+    fn the_first_screen_is_turned_off_by_a_switch_that_is_written_down() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        assert!(!app.state.no_splash, "the first screen shows until it is turned off");
+        assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::NoSplash)), "the switch is on the settings page");
+        assert!(tap(&mut app, &f, &i, Action::Toggle(Switch::NoSplash)).is_empty(), "turning it off asks nothing of the runtime");
+        assert!(app.state.no_splash);
+        assert!(crate::settings::Settings::of(&app.state).no_splash, "and is kept for the next start");
+        assert!(tap(&mut app, &f, &i, Action::Toggle(Switch::NoSplash)).is_empty());
+        assert!(!app.state.no_splash);
     }
 
     #[test]

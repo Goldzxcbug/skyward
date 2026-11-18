@@ -6,6 +6,10 @@ English | [简体中文](README.zh-CN.md)
 
 Skyward is a recovery written in Rust, from scratch.
 
+**Gold_bug** is a source-only fork of [Skyward](https://github.com/kirklin/skyward).
+It adds a landscape layout and device support for the OnePlus Pad 2 Pro
+(`erhai`, OP615EL1). [Build the tablet recovery locally](#oneplus-pad-2-pro).
+
 <p align="center">
   <img src="assets/home.png" width="30%" alt="Home">
   <img src="assets/settings-dark.png" width="30%" alt="Settings in dark mode">
@@ -198,6 +202,25 @@ the 13 Ultra's can with a USB cable in, Skyward's program finds the request in m
 at the next start and brings Skyward up before anything else.
 
 ## Building
+
+### OnePlus Pad 2 Pro
+
+Use the original recovery image from ColorOS `OPD2413_16.0.7.200(CN01)`.
+Save it as `recovery.img` in the repository root or set `SKYWARD_STOCK_IMAGE`
+to its path. The build script verifies the input against the SHA-256 in the
+[port's source record](tools/erhai-sources.json).
+
+On Linux, use the Rust toolchain named in `rust-toolchain.toml`, Android NDK
+r29, Python 3, `lz4`, and `xz`. Point `ANDROID_NDK_ROOT` at the installed NDK.
+
+```sh
+bash tools/build-erhai.sh
+```
+
+The script builds and verifies `out/erhai/skyward-v0.3.1-Gold_bug-OP615EL1.img`.
+Build output and the stock input stay local.
+
+### Other devices
 
 Skyward builds with the version of Rust that `rust-toolchain.toml` names, with its
 `aarch64-linux-android` target, the Android NDK r29 and

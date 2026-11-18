@@ -1,0 +1,10 @@
+service vendor.secure_element /odm/bin/hw/android.hardware.secure_element-service.qti
+    class early_hal
+    user system
+    group nfc system
+
+service vendor.weaver_nxp /odm/bin/hw/android.hardware.weaver-service.nxp
+    class hal
+    user vendor_nxp_weaver
+    group system drmrpc
+    capabilities WAKE_ALARM

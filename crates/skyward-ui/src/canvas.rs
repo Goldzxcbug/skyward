@@ -442,6 +442,15 @@ impl Canvas {
         out
     }
 
+    /// Copy a full-height pane at column `x`, without blending its pixels.
+    pub(crate) fn put_pane(&mut self, pane: &Canvas, x: u32) {
+        assert!(self.whole() && pane.whole() && pane.h == self.h && x + pane.w <= self.w);
+        let (stride, width, start) = (self.w as usize * 4, pane.w as usize * 4, x as usize * 4);
+        for (dst, src) in self.data.chunks_exact_mut(stride).zip(pane.data.chunks_exact(width)) {
+            dst[start..start + width].copy_from_slice(src);
+        }
+    }
+
     /// Copy the opaque `strip`, as wide as this canvas, over it with its top
     /// row at `y`; rows past either edge are left out.
     pub fn put(&mut self, strip: &Canvas, y: i32) {

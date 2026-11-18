@@ -116,7 +116,7 @@ impl Tone {
     }
 }
 
-fn chevron(c: &mut Canvas, t: &Theme, right: f32, cy: f32, color: Rgba) {
+pub(crate) fn chevron(c: &mut Canvas, t: &Theme, right: f32, cy: f32, color: Rgba) {
     let m = &t.m;
     let (w, h, sw) = (m.chevron_w, m.chevron_h, m.chevron_stroke);
     let x0 = right - w + sw / 2.0;

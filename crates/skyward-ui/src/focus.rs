@@ -21,6 +21,8 @@ pub enum Stop {
 /// Where a stop lies, which is how it moves as the page scrolls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
+    /// On the tablet's navigation column, which scrolls independently.
+    Sidebar,
     /// The `<` and the bar's round button, held at the top of the screen.
     Fixed,
     /// On the strip that scrolls with the page until it reaches the bar.
@@ -132,7 +134,7 @@ pub fn lit(t: &Theme, stop: Stop, r: Rect, keypad: bool) -> (Rect, f32) {
         }
         // The other capsules: the path's folders, the text that leaves a
         // page, and the search bar.
-        Stop::Hit(Action::OpenAncestor(_) | Action::Skip | Action::Open(Screen::Search)) => (r, r.h / 2.0),
+        Stop::Hit(Action::OpenAncestor(_) | Action::Skip | Action::Open(Screen::Search) | Action::Sidebar(Screen::Search)) => (r, r.h / 2.0),
         Stop::Hit(_) => {
             let (dx, dy) = (m.dp(ROW_INSET_X_DP), m.dp(ROW_INSET_Y_DP));
             (Rect::new(r.x + dx, r.y + dy, r.w - dx * 2.0, r.h - dy * 2.0), m.card_radius - dx)

@@ -6,6 +6,10 @@
 
 Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 
+**Gold_bug** 是仅发布源码的 [Skyward](https://github.com/kirklin/skyward)
+分支，增加了一加平板 2 Pro（`erhai`，OP615EL1）适配和横屏双栏界面。
+[在本地构建一加平板镜像](#一加平板-2-pro)。
+
 <p align="center">
   <img src="assets/home.png" width="30%" alt="首页">
   <img src="assets/settings-dark.png" width="30%" alt="深色模式下的设置">
@@ -148,6 +152,24 @@ Skyward 可以在手机自身分区中的系统旁边安装第二系统，主系
 正在运行的系统也可以请求切换：在 misc 中写入 `boot-recovery` 和 `--switch_system=installed`，或者 `--switch_system=` 加上第二系统的 `id`，然后重启到 recovery。bootloader 仍然启动这个槽位的话（小米 13 Ultra 连着 USB 线时可能这样），Skyward 的程序会在下次启动时在 misc 中看到这个请求，先进入 Skyward。
 
 ## 构建
+
+### 一加平板 2 Pro
+
+使用 ColorOS `OPD2413_16.0.7.200(CN01)` 的原厂 Recovery 镜像。将它保存为仓库
+根目录下的 `recovery.img`，也可以通过 `SKYWARD_STOCK_IMAGE` 指定路径。脚本按
+[移植源码记录](tools/erhai-sources.json)中的 SHA-256 校验输入镜像。
+
+在 Linux 上使用 `rust-toolchain.toml` 指定的 Rust 工具链、Android NDK r29、
+Python 3、`lz4` 和 `xz`，并将 `ANDROID_NDK_ROOT` 指向 NDK 安装目录。
+
+```sh
+bash tools/build-erhai.sh
+```
+
+脚本会构建并校验 `out/erhai/skyward-v0.3.1-Gold_bug-OP615EL1.img`。
+原厂镜像和构建产物保存在本地。
+
+### 其他机型
 
 Skyward 使用 `rust-toolchain.toml` 指定版本的 Rust 和它的 `aarch64-linux-android` 目标、Android NDK r29 和 [cargo-ndk](https://github.com/bbqsrc/cargo-ndk) 构建。recovery 服务针对手机构建，打包工具针对电脑构建：
 

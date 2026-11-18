@@ -5,6 +5,14 @@
 use super::*;
 
 impl App {
+    fn render_page(&self, screen: Screen, cx: &Ctx) -> Frame {
+        if self.tablet.is_some() && screen == Screen::About {
+            pages::tablet_overview(cx, self.stack.len() > 1)
+        } else {
+            pages::render(screen, cx)
+        }
+    }
+
     /// What the status bar shows, its clock reading `clock`: the battery,
     /// the network joined, the data partition's lock, the slot the system
     /// runs from, and the battery's temperature.
@@ -40,7 +48,7 @@ impl App {
             for rows in std::mem::take(&mut self.stale) {
                 let band = Band { rows, cols: (0, self.cols) };
                 let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
-                let fresh = pages::render(screen, &cx);
+                let fresh = self.render_page(screen, &cx);
                 let mut canvas = self.frame.take().expect("checked above").canvas;
                 assert_eq!(canvas.h, fresh.canvas.h, "a page drawn again in part is as tall as it was");
                 canvas.replace(&fresh.canvas);
@@ -53,7 +61,7 @@ impl App {
             let first = self.top().1.max(0.0) as u32;
             let band = Band { rows: (first, first + self.h), cols: (0, wide.min(self.w)) };
             let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
-            let mut frame = pages::render(screen, &cx);
+            let mut frame = self.render_page(screen, &cx);
             // A page drawn in part across holds its rows whole, the columns
             // of them drawn on as they are needed.
             self.cols = frame.canvas.cols().end;
@@ -114,7 +122,7 @@ impl App {
         let t = self.theme();
         let band = Band { rows: (held.start, held.end), cols: (self.cols, wide) };
         let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
-        let part = pages::render(self.screen(), &cx).canvas;
+        let part = self.render_page(self.screen(), &cx).canvas;
         self.frame.as_mut().expect("drawn above").canvas.replace(&part);
         self.cols = wide;
         self.layer = None;
@@ -145,7 +153,7 @@ impl App {
         for rows in bands {
             let band = Band { rows, cols: (0, self.w) };
             let cx = Ctx { t: &t, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
-            let part = pages::render(screen, &cx).canvas;
+            let part = self.render_page(screen, &cx).canvas;
             self.frame.as_mut().expect("drawn above").canvas.join(&part);
         }
         self.layer = None;
@@ -167,7 +175,11 @@ impl App {
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
         let charge = self.charging.as_ref().map_or(0.0, |c| c.shown.level(now));
         if charge < 1.0 {
-            self.compose_page(out, f, info, clock, now);
+            if self.tablet.is_some() {
+                self.compose_tablet(out, f, info, clock, now);
+            } else {
+                self.compose_page(out, f, info, clock, now);
+            }
         }
         if charge > 0.0 {
             self.compose_charging(out, f, info, charge, now);
@@ -178,12 +190,16 @@ impl App {
     /// The charging screen, `level` of the way over the page drawn on `out`.
     fn compose_charging(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, level: f32, now: u64) {
         let battery = info.battery.as_ref().expect("a cable went in on a phone whose battery is read");
-        let (t, lang) = (self.theme(), self.state.lang);
+        let (t, lang) = (self.panel_theme(), self.state.lang);
         if !self.charge_art.as_ref().is_some_and(|a| a.shows(lang, battery)) {
             self.charge_art = Some(charge::Art::new(f, &t.m, lang, battery).expect("the screens' face takes the charging screen's weight"));
         }
         let since = self.charging.as_ref().map_or(now, |c| c.since);
-        let dither = self.dither.get_or_insert_with(|| glow::Dither::new(out.w as usize, out.h as usize));
+        let dither = match &mut self.tablet {
+            Some(tablet) => &mut tablet.charge_dither,
+            None => &mut self.dither,
+        };
+        let dither = dither.get_or_insert_with(|| glow::Dither::new(out.w as usize, out.h as usize));
         let art = self.charge_art.as_ref().expect("drawn above");
         if level >= 1.0 {
             charge::draw(out, art, &t.m, battery.level, now.saturating_sub(since), dither);
@@ -199,11 +215,14 @@ impl App {
     /// page, the `<`, the page sliding in or out over or under the page
     /// left, the status bar, any message, and the back cue while a swipe
     /// from an edge is under way.
-    fn compose_page(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
+    pub(super) fn compose_page(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
         // A page opened is drawn from its left edge as it slides in.
         let opening = self.turn.as_ref().is_some_and(|t| !t.back);
         self.render(f, info, if opening { 0 } else { self.w });
         let screen = self.screen();
+        if screen == Screen::About && self.glow.is_none() {
+            self.glow = Some(GlowClock::new(self.theme().hero.glow, now));
+        }
         let scroll = self.top().1;
         let offset = (scroll + self.overscroll(now)).round();
         let caret_on = match self.frame.as_ref().is_some_and(|fr| fr.caret.is_some()) {
@@ -271,7 +290,7 @@ impl App {
             let pressed = t.pressed();
             let band = Band { rows: (y, y + h), cols: (x, x + w) };
             let cx = Ctx { t: &pressed, f, info, state: &self.state, term: self.term.as_ref(), band: Some(band) };
-            let down = pages::render(screen, &cx).canvas;
+            let down = self.render_page(screen, &cx).canvas;
             assert_eq!((down.w, down.h), (page.w, page.h), "a page held down is laid out as it was");
             self.row_art = Some((page.crop(x, y, w, h), down.crop(x, y, w, h)));
         }
@@ -319,7 +338,9 @@ impl App {
         }
         self.shown = Some(view);
 
-        widgets::status_bar(out, &t, f, &self.bar(clock, info), t.pal.status);
+        if self.tablet.is_none() {
+            widgets::status_bar(out, &t, f, &self.bar(clock, info), t.pal.status);
+        }
         if let Some((text, _)) = &self.toast {
             widgets::toast(out, &t, f, text);
         }

@@ -7,6 +7,7 @@ impl App {
     pub(super) fn act(&mut self, action: Action, now: u64) -> Vec<Effect> {
         let l = self.state.lang;
         match action {
+            Action::Sidebar(screen) => return self.select_section(screen, now),
             Action::Open(s) => {
                 if s == Screen::Search && self.screen() == Screen::Home {
                     // The bar moves up from where it stands unfolded: a
@@ -27,7 +28,7 @@ impl App {
                 if self.stack.len() > 1 {
                     self.stack.pop();
                 } else {
-                    *self.top_mut() = (Screen::Home, 0.0, Focus::Unset);
+                    *self.top_mut() = (self.home_screen(), 0.0, Focus::Unset);
                 }
                 self.settle_page();
                 self.refresh();
@@ -45,6 +46,10 @@ impl App {
                 let w = self.state.wlan.as_mut().expect("the WLAN switch shows on a phone whose WLAN is brought up");
                 let on = matches!(w.power, Power::Off | Power::Failed(_));
                 *w = Wlan { power: if on { Power::Starting } else { Power::Off }, ..Wlan::default() };
+                // A swipe asked for on the page goes with the list it was
+                // asked on.
+                self.state.forget_pending = None;
+                self.state.asking_delete = false;
                 self.refresh();
                 return vec![Effect::Wlan(on)];
             }
@@ -57,13 +62,28 @@ impl App {
                     Switch::Signature => &mut self.state.check_signature,
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
                     Switch::ShowPassword => &mut self.state.show_password,
+                    Switch::RememberWlan => &mut self.state.remember_wlan,
+                    Switch::NoSplash => &mut self.state.no_splash,
                     Switch::Wlan => unreachable!("the WLAN switch is turned above"),
                 };
                 *on = !*on;
                 let now_on = *on;
+                // Turning remembering off takes what is kept away, and the
+                // page says so at once: a password left on the phone after
+                // the switch was turned off is the one thing the switch
+                // promises not to do. What is kept is read again from the
+                // runtime once it has forgotten it.
+                if switch == Switch::RememberWlan && !now_on {
+                    self.state.saved.clear();
+                    self.state.forget_pending = None;
+                    self.state.asking_delete = false;
+                }
                 self.refresh();
                 if switch == Switch::FileTransfer {
                     return vec![Effect::FileTransfer(now_on)];
+                }
+                if switch == Switch::RememberWlan && !now_on {
+                    return vec![Effect::ForgetWlan(String::new())];
                 }
             }
             Action::MountToggle(i) => {
@@ -139,7 +159,7 @@ impl App {
             Action::RebootTo(target) => return vec![Effect::Reboot(target)],
             Action::EnterRecovery => return vec![Effect::EnterRecovery],
             Action::Dismiss => {
-                self.stack = vec![(Screen::Home, 0.0, Focus::Unset)];
+                self.stack = vec![(self.home_screen(), 0.0, Focus::Unset)];
                 self.settle_page();
                 self.refresh();
                 return vec![Effect::Dismiss];
@@ -441,6 +461,27 @@ impl App {
                 let mut fx = self.back(now);
                 fx.push(Effect::LeaveWlan);
                 return fx;
+            }
+            // Forgetting a network is asked for on its own page, and the
+            // swipe under it confirms it. Nothing goes until the runtime
+            // says the password is gone.
+            Action::ForgetNetwork => {
+                if self.state.details.is_some() {
+                    self.state.forget_pending = None;
+                    self.state.asking_delete = true;
+                    self.state.confirm = 0.0;
+                    self.refresh();
+                }
+            }
+            // A row of what is kept: the name is all the page has, and the
+            // swipe under the list asks whether it is meant.
+            Action::ForgetSaved(i) => {
+                if let Some(saved) = self.state.saved.get(i) {
+                    self.state.forget_pending = Some(saved.name.clone());
+                    self.state.asking_delete = true;
+                    self.state.confirm = 0.0;
+                    self.refresh();
+                }
             }
             Action::Rescan => return vec![Effect::ScanWlan],
             Action::AddNetwork => {
@@ -829,6 +870,27 @@ impl App {
                     fx.push(Effect::InstallSystem { size: choice.sizes[choice.size] });
                     self.state.install = Install::Systeming { name: choice.name.clone(), stage: None };
                     self.refresh();
+                }
+            }
+            // Forgetting is the details page's own row, or a row of what is
+            // kept. The details page goes back first, so the page under it
+            // is the one that shows what is left. A network nothing is kept
+            // of is only left: forgetting it would be told there is nothing
+            // to forget.
+            Confirm::ForgetNetwork => {
+                let from_details = self.state.details.take();
+                let name = from_details.as_ref().map(|n| n.name.clone()).or_else(|| self.state.forget_pending.take());
+                let kept = name.as_ref().is_some_and(|name| self.state.saved.iter().any(|s| &s.name == name));
+                self.state.forget_pending = None;
+                self.state.asking_delete = false;
+                self.state.confirm = 0.0;
+                if from_details.is_some() {
+                    fx.extend(self.back(now));
+                }
+                match name {
+                    Some(_) if from_details.is_some() && !kept => fx.push(Effect::LeaveWlan),
+                    Some(name) => fx.push(Effect::ForgetWlan(name)),
+                    None => self.say(l.pick(["没有要忘记的网络", "沒有要忘記的網路", "There is no network to forget"]), now),
                 }
             }
         }

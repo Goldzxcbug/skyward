@@ -1,4 +1,9 @@
 target/
+.build-tools/
+out/
+/*.img
+/preview-out/
+__pycache__/
 .idea/
 .vscode/
 .DS_Store

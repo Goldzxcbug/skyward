@@ -38,6 +38,18 @@ impl App {
             self.end_turn();
         }
         self.stir(now);
+        let ev = if let Some(tablet) = &self.tablet {
+            let divider = tablet.width as f32;
+            match ev {
+                Touch::Down(x, _) if x < divider => return self.touch_sidebar(ev, now),
+                Touch::Move(..) | Touch::Up if matches!(self.drag, Drag::Sidebar { .. }) => return self.touch_sidebar(ev, now),
+                Touch::Down(x, y) => Touch::Down(x - divider, y),
+                Touch::Move(x, y) => Touch::Move(x - divider, y),
+                Touch::Up => Touch::Up,
+            }
+        } else {
+            ev
+        };
         let t = self.theme();
         let m = t.m;
         let (slop, edge) = (m.dp(8.0), m.dp(20.0));
@@ -200,6 +212,7 @@ impl App {
                 }
                 Drag::Waking => self.drag = Drag::Waking,
                 Drag::Held => self.drag = Drag::Held,
+                Drag::Sidebar { .. } => unreachable!("sidebar moves are routed above"),
                 Drag::Idle => {}
             },
             Touch::Up => match std::mem::replace(&mut self.drag, Drag::Idle) {

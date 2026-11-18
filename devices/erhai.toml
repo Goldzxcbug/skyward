@@ -1,0 +1,65 @@
+# OnePlus Pad 2 Pro, ColorOS OPD2413_16.0.7.200(CN01).
+# OP615EL1 is the installed system / OTA device identifier; erhai is the
+# hardware's community codename. Values below were read from the tablet.
+[device]
+codename = "OP615EL1"
+brand = "OnePlus"
+model = "OnePlus Pad 2 Pro"
+ab = true
+soc = { hans = "骁龙®8至尊版移动平台", hant = "Snapdragon® 8 Elite 行動平台", en = "Snapdragon® 8 Elite Mobile Platform" }
+os_version_prop = "ro.build.display.id"
+
+[display]
+keep_scanout_on_blank = true
+# Stock wm size / density. DRM supplies the native landscape surface;
+# touch axes are converted to that surface by the rotation below.
+width = 2400
+height = 3392
+density = 420
+diagonal = 13.2
+corner_radius = 0
+
+[touch]
+# NT36536 reports portrait axes while the panel scans landscape. Mirror
+# sensor X, then swap: (u, v) -> (v, 1-u). This agrees with the measured
+# touch mapping in linux-sm8750-erhai's sm8750-erhai.dts (USB on the right).
+# Source: https://github.com/yzddmr6/linux-sm8750-erhai/blob/9e815bd9d56a133646cdf5e1e039ec65e8bc478f/arch/arm64/boot/dts/qcom/sm8750-erhai.dts#L2010-L2024
+rotation = 270
+
+[modules]
+sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
+# /sys/.../spi0.0/driver/module resolves to NT36536. This controller
+# reports coordinates itself; it does not use the phone's Synaptics HBP HAL.
+load = ["msm_drm", "oplus_bsp_tp_nt36536_noflash"]
+
+[firmware]
+partition = "modem"
+
+[partitions]
+mounted = ["persist", "vendor_dlkm", "system_dlkm"]
+
+# init.qti.kernel.rc's kernel-post-boot service. The stock dispatcher
+# selects init.kernel.post_boot-sun.sh for this SoC. Keep its real groups.
+[[service]]
+path = "/vendor/bin/sh"
+args = ["/vendor/bin/init.kernel.post_boot.sh"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+oneshot = true
+user = "root"
+groups = ["root", "system", "wakelock", "graphics"]
+
+# The Pad uses Qualcomm KeyMint and Gatekeeper, discovered from its own
+# manifests/init scripts. No Weaver/eSE/NFC HAL is active on this tablet;
+# do not copy the phone's NXP services or /dev/nq-nci ownership here.
+
+[wlan]
+modules = ["rfkill", "cnss2", "qca_cld3_peach_v2"]
+writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
+# The exact requested name was read from qca_cld3_peach_v2.ko. Stock
+# persist holds this configuration; no network credentials are copied.
+firmware = [{ name = "wlan/WCNSS_qcom_cfg.ini", path = "/mnt/vendor/persist/wlan/WCNSS_qcom_cfg.ini" }]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/system/lib64", "/vendor/lib64", "/odm/lib64"]
+service = "android.hardware.wifi.supplicant.ISupplicant/default"
+probe = "http://conn1.oppomobile.com/generate_204"

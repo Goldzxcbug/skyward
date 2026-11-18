@@ -60,6 +60,12 @@ pub const LIGHT: Glow = Glow {
     ink: Ink { tone: (74.0 / 255.0, 0.8), dodge: false, linear_light: (79.0 / 255.0, 1.0), floor: 59.0, rise: 0.18 },
 };
 
+/// The tablet's device overview rests on a cool field with a warm edge.
+pub(crate) const TABLET_LIGHT: Glow = Glow {
+    colors: [[[0.96, 0.86, 0.94, 1.0], [0.87, 0.94, 1.0, 1.0], [0.85, 0.87, 1.0, 1.0], [0.58, 0.74, 1.0, 1.0]]; 3],
+    ..LIGHT
+};
+
 pub const DARK: Glow = Glow {
     discs: DISCS,
     wander: 0.4,

@@ -16,6 +16,8 @@ pub struct State {
     /// How long the screen stays on with nothing touched, by its place in
     /// [`SCREEN_OFF`].
     pub screen_off: usize,
+    /// The first screen is not drawn, so the pages come up at once.
+    pub no_splash: bool,
     /// The time zone the clock and the times on the pages keep, by its
     /// place in [`TIME_ZONES`].
     pub time_zone: usize,
@@ -162,6 +164,15 @@ pub struct State {
     pub joining: Option<Network>,
     /// The network the details page is of, as it was found.
     pub details: Option<Network>,
+    /// Whether a network joined has its password kept, so that the recovery
+    /// joins it by itself at the next start.
+    pub remember_wlan: bool,
+    /// The networks whose passwords the phone keeps, as the runtime last
+    /// told them: what the WLAN page offers to forget.
+    pub saved: Vec<SavedNetwork>,
+    /// The saved network whose forgetting waits for a swipe, by the name
+    /// the page shows.
+    pub forget_pending: Option<String>,
     /// The network the page that adds one is adding.
     pub adding: Option<Adding>,
     /// The password typed on the password page or the page that adds a
@@ -192,6 +203,7 @@ impl Default for State {
             brightness: SLIDER_START,
             // Two minutes.
             screen_off: 3,
+            no_splash: false,
             time_zone: 0,
             vibrate: true,
             vibration: SLIDER_START,
@@ -256,6 +268,9 @@ impl Default for State {
             wlan: None,
             joining: None,
             details: None,
+            remember_wlan: true,
+            saved: Vec::new(),
+            forget_pending: None,
             adding: None,
             password: String::new(),
             show_password: false,

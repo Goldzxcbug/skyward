@@ -138,7 +138,7 @@ impl Worker {
                 Task::CheckSkyward { probe, codename } => {
                     let a = http::agent(servers.clone());
                     *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
-                    let answer = github::ask(&a, &codename, skyward_info::VERSION).map_err(|e| unanswered(&e, github::LATEST, &probe, &servers));
+                    let answer = github::ask(&a, &codename, skyward_info::BUILD_VERSION).map_err(|e| unanswered(&e, github::LATEST, &probe, &servers));
                     tell(Event::SkywardChecked(answer));
                 }
                 // GitHub's API hands the zip out at a short-lived address
@@ -148,7 +148,7 @@ impl Worker {
                 Task::UpdateSkyward { build, codename, path } => {
                     let a = http::agent(servers.clone());
                     *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
-                    let located = github::locate(&a, &build.url, skyward_info::VERSION)
+                    let located = github::locate(&a, &build.url, skyward_info::BUILD_VERSION)
                         .inspect_err(|e| {
                             let _ = skyward_sys::kmsg(&format!("asking GitHub where {} is: {e:#}", build.name));
                         })
@@ -159,7 +159,7 @@ impl Worker {
                             return Again::Retry;
                         }
                         located_again = true;
-                        match github::locate(a, &build.url, skyward_info::VERSION) {
+                        match github::locate(a, &build.url, skyward_info::BUILD_VERSION) {
                             Ok(fresh) => Again::From(build.sources(Some(fresh))),
                             Err(e) => {
                                 let _ = skyward_sys::kmsg(&format!("asking GitHub again where {} is: {e:#}", build.name));

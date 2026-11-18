@@ -1,0 +1,48 @@
+service vendor.qseecomd /vendor/bin/qseecomd
+    class core
+    user root
+    group root drmrpc
+    socket notify-topology stream 0660 system drmrpc
+
+service vendor.ssgtzd /vendor/bin/ssgtzd
+    class late_start
+    user system
+    group system oem_2912 wakelock
+    disabled
+    capabilities WAKE_ALARM BLOCK_SUSPEND
+    socket ssgtzd stream 0660 system oem_2912
+    socket ssgtzd_opener stream 0660 system system
+
+service vendor.minkdaemon /vendor/bin/hlosminkdaemon
+    class late_start
+    user system
+    group system
+    disabled
+    socket hlos_mink_opener stream 0660 system system
+
+on early-boot
+    start vendor.ssgtzd
+    start vendor.minkdaemon
+
+service vendor.gatekeeper_default /vendor/bin/hw/android.hardware.gatekeeper-service-qti
+    class early_hal
+    user system
+    group system
+    disabled
+
+service vendor.gatekeeper_spu /vendor/bin/hw/android.hardware.gatekeeper-service-spu-qti
+    class early_hal
+    user system
+    group system
+    disabled
+
+on property:vendor.gatekeeper.is_security_level_spu=0
+    enable vendor.gatekeeper_default
+
+on property:vendor.gatekeeper.is_security_level_spu=1
+    enable vendor.gatekeeper_spu
+
+service vendor.boot-qti /vendor/bin/hw/android.hardware.boot-service.qti
+    class early_hal
+    user root
+    group root
